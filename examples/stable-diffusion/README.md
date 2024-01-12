@@ -294,3 +294,84 @@ image = pipe(prompt, num_inference_steps=50, guidance_scale=7.5).images[0]
 
 image.save("cat-backpack.png")
 ```
+
+## Textual Inversion fine-tuning example for SDXL
+
+The `textual_inversion_sdxl.py` script shows how to implement textual inversion fine-tuning for SDXL on Habana Gaudi.
+
+### Single Card Run for SDXL
+
+Assuming the afforemenioned cat toy dataset has been obtained, we can launch SDXL based training using:
+
+
+```bash
+python textual_inversion_sdxl.py \
+  --pretrained_model_name_or_path=stabilityai/stable-diffusion-xl-base-1.0 \
+  --train_data_dir=./cat \
+  --learnable_property="object" \
+  --placeholder_token="<cat-toy>" \
+  --initializer_token="toy" \
+  --resolution=768 \
+  --train_batch_size=4 \
+  --gradient_accumulation_steps=4 \
+  --max_train_steps=500 \
+  --learning_rate=5.0e-04 \
+  --scale_lr \
+  --lr_scheduler="constant" \
+  --lr_warmup_steps=0 \
+  --output_dir="/tmp/textual_inversion_cat_sdxl" \
+  --save_as_full_pipeline \
+  --gaudi_config_name Habana/stable-diffusion \
+  --throughput_warmup_steps 3
+```
+
+### Multi-card Run for SDXL
+
+You can run SDXL based fine-tuning script in a distributed fashion as follows:
+
+```bash
+python ../gaudi_spawn.py --use_mpi --world_size 8 textual_inversion_sdxl.py \
+  --pretrained_model_name_or_path=stabilityai/stable-diffusion-xl-base-1.0 \
+  --train_data_dir=./cat \
+  --learnable_property="object" \
+  --placeholder_token='"<cat-toy>"' \
+  --initializer_token="toy" \
+  --resolution=768 \
+  --train_batch_size=4 \
+  --gradient_accumulation_steps=4 \
+  --max_train_steps=500 \
+  --learning_rate=5.0e-04 \
+  --scale_lr \
+  --lr_scheduler="constant" \
+  --lr_warmup_steps=0 \
+  --output_dir="/tmp/textual_inversion_cat_sdxl" \
+  --save_as_full_pipeline \
+  --gaudi_config_name Habana/stable-diffusion \
+  --throughput_warmup_steps 3
+```
+
+### Inference for SDXL
+
+Once the model is trained as described right above, inference can be done simply using the `GaudiStableDiffusionXLPipeline`. Make sure to include the `placeholder_token` in your prompt.
+
+```python
+import torch
+
+from optimum.habana.diffusers import GaudiStableDiffusionXLPipeline
+
+
+model_id = "/tmp/textual_inversion_cat_sdxl"
+pipe = GaudiStableDiffusionXLPipeline.from_pretrained(
+    model_id,
+    torch_dtype=torch.bfloat16,
+    use_habana=True,
+    use_hpu_graphs=True,
+    gaudi_config="Habana/stable-diffusion",
+)
+
+prompt = "A <cat-toy> backpack"
+
+image = pipe(prompt, num_inference_steps=50, guidance_scale=7.5).images[0]
+
+image.save("cat-backpack_sdxl.png")
+```
