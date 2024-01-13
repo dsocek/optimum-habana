@@ -14,49 +14,31 @@
 
 import inspect
 import time
-from math import ceil
 from dataclasses import dataclass
+from math import ceil
 from typing import Callable, Dict, List, Optional, Union
 
 import numpy as np
 import PIL.Image
 import torch
-from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
-
-from diffusers.image_processor import VaeImageProcessor
-from diffusers.models import UNetSpatioTemporalConditionModel
-from diffusers.models import AutoencoderKLTemporalDecoder
+from diffusers.models import AutoencoderKLTemporalDecoder, UNetSpatioTemporalConditionModel
+from diffusers.pipelines.stable_video_diffusion import StableVideoDiffusionPipeline
+from diffusers.pipelines.stable_video_diffusion.pipeline_stable_video_diffusion import (
+    _append_dims,
+    _resize_with_antialiasing,
+    tensor2vid,
+)
 from diffusers.schedulers import EulerDiscreteScheduler
 from diffusers.utils import BaseOutput, logging
 from diffusers.utils.torch_utils import randn_tensor
+from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
+
 from ....transformers.gaudi_configuration import GaudiConfig
 from ....utils import speed_metrics
 from ..pipeline_utils import GaudiDiffusionPipeline
 
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
-
-
-def _append_dims(x, target_dims):
-    """Appends dimensions to the end of a tensor until it has target_dims dimensions."""
-    dims_to_append = target_dims - x.ndim
-    if dims_to_append < 0:
-        raise ValueError(f"input has {x.ndim} dims but target_dims is {target_dims}, which is less")
-    return x[(...,) + (None,) * dims_to_append]
-
-
-def tensor2vid(video: torch.Tensor, processor, output_type="np"):
-    # Based on:
-    # https://github.com/modelscope/modelscope/blob/1509fdb973e5871f37148a4b5e5964cafd43e64d/modelscope/pipelines/multi_modal/text_to_video_synthesis_pipeline.py#L78
-
-    batch_size, channels, num_frames, height, width = video.shape
-    outputs = []
-    for batch_idx in range(batch_size):
-        batch_vid = video[batch_idx].permute(1, 0, 2, 3)
-        batch_output = processor.postprocess(batch_vid, output_type)
-
-        outputs.append(batch_output)
-
-    return outputs
 
 
 @dataclass
@@ -68,13 +50,15 @@ class GaudiStableVideoDiffusionPipelineOutput(BaseOutput):
         frames (`[List[PIL.Image.Image]`, `np.ndarray`]):
             List of denoised PIL images of length `batch_size` or NumPy array of shape `(batch_size, height, width,
             num_channels)`.
+        throughput (float):
+            Measured samples per second
     """
 
     frames: Union[List[PIL.Image.Image], np.ndarray]
     throughput: float
 
 
-class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline):
+class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline, StableVideoDiffusionPipeline):
     r"""
     Pipeline to generate video from an input image using Stable Video Diffusion.
 
@@ -104,18 +88,33 @@ class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline):
         unet: UNetSpatioTemporalConditionModel,
         scheduler: EulerDiscreteScheduler,
         feature_extractor: CLIPImageProcessor,
+        use_habana: bool = False,
+        use_hpu_graphs: bool = False,
+        gaudi_config: Union[str, GaudiConfig] = None,
+        bf16_full_eval: bool = False,
     ):
-        super().__init__()
-
-        self.register_modules(
-            vae=vae,
-            image_encoder=image_encoder,
-            unet=unet,
-            scheduler=scheduler,
-            feature_extractor=feature_extractor,
+        GaudiDiffusionPipeline.__init__(
+            self,
+            use_habana,
+            use_hpu_graphs,
+            gaudi_config,
+            bf16_full_eval,
         )
-        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
-        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+
+        # Workaround for Synapse 1.11 for full bf16
+        if bf16_full_eval:
+            unet.conv_in.float()
+
+        StableVideoDiffusionPipeline.__init__(
+            self,
+            vae,
+            image_encoder,
+            unet,
+            scheduler,
+            feature_extractor,
+        )
+
+        self.to(self._device)
 
     def _encode_image(self, image, device, num_videos_per_prompt, do_classifier_free_guidance):
         dtype = next(self.image_encoder.parameters()).dtype
@@ -278,7 +277,10 @@ class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline):
             )
 
         if latents is None:
-            latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+            # latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+            # torch.randn is broken on HPU so running it on CPU
+            rand_device = "cpu" if device.type == "hpu" else device
+            latents = randn_tensor(shape, generator=generator, device=rand_device, dtype=dtype).to(device)
         else:
             latents = latents.to(device)
 
@@ -302,24 +304,12 @@ class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline):
         return self._num_timesteps
 
     @classmethod
-    def _pad_batches(
-            cls,
-            input_batches,
-            num_dummy_samples
-    ):
-        sequence_to_stack = (input_batches[-1],) + tuple(
-            torch.zeros_like(input_batches[-1][0][None, :]) for _ in range(num_dummy_samples)
-        )
-        input_batches[-1] = torch.vstack(sequence_to_stack)
-        return input_batches
-
-    @classmethod
     def _split_input_into_batches(
-            cls,
-            cond_input,
-            batch_size,
-            num_dummy_samples,
-            uncond_input=None,
+        cls,
+        cond_input,
+        batch_size,
+        num_dummy_samples,
+        uncond_input=None,
     ):
         input_batches = list(torch.split(cond_input, batch_size))
         uncond_input_batches = None
@@ -335,21 +325,19 @@ class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline):
             # For classifier free guidance, we need to do two forward passes.
             # Here we concatenate the unconditional and conditional inputs into a single batch
             # to avoid doing two forward passes
-            for i, (uncond_input_batch, input_batch) in enumerate(
-                    zip(uncond_input_batches, input_batches[:])
-            ):
+            for i, (uncond_input_batch, input_batch) in enumerate(zip(uncond_input_batches, input_batches[:])):
                 input_batches[i] = torch.cat([uncond_input_batch, input_batch])
         input_batches = torch.stack(input_batches)
         return input_batches
 
     @classmethod
     def _split_image_latents_into_batches(
-            cls,
-            image_latents,
-            batch_size,
-            num_dummy_samples,
-            num_images,
-            do_classifier_free_guidance,
+        cls,
+        image_latents,
+        batch_size,
+        num_dummy_samples,
+        num_images,
+        do_classifier_free_guidance,
     ):
         if do_classifier_free_guidance:
             # Tiling of unconditional and conditional image latents differs from image embeddings
@@ -362,7 +350,7 @@ class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline):
                 image_latents_batches = cls._pad_batches(image_latents_batches, num_dummy_samples)
                 negative_image_latents_batches = cls._pad_batches(negative_image_latents_batches, num_dummy_samples)
             for i, (negative_image_latents_batch, image_latents_batch) in enumerate(
-                    zip(negative_image_latents_batches, image_latents_batches[:])
+                zip(negative_image_latents_batches, image_latents_batches[:])
             ):
                 uncond_splits = list(torch.split(negative_image_latents_batch, num_images))
                 cond_splits = list(torch.split(image_latents_batch, num_images))
@@ -376,14 +364,14 @@ class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline):
 
     @classmethod
     def _split_inputs_into_batches(
-            cls,
-            batch_size,
-            latents,
-            image_latents,
-            image_embeddings,
-            added_time_ids,
-            num_images,
-            do_classifier_free_guidance
+        cls,
+        batch_size,
+        latents,
+        image_latents,
+        image_embeddings,
+        added_time_ids,
+        num_images,
+        do_classifier_free_guidance,
     ):
         if do_classifier_free_guidance:
             negative_image_embeddings, image_embeddings = image_embeddings.chunk(2)
@@ -399,16 +387,22 @@ class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline):
         # Generate num_batches batches of size batch_size
         latents_batches = cls._split_input_into_batches(latents, batch_size, num_dummy_samples)
         image_latents_batches = cls._split_image_latents_into_batches(
-            image_latents,
-            batch_size,
-            num_dummy_samples,
-            num_images,
-            do_classifier_free_guidance
+            image_latents, batch_size, num_dummy_samples, num_images, do_classifier_free_guidance
         )
-        image_embeddings_batches = cls._split_input_into_batches(image_embeddings, batch_size, num_dummy_samples, negative_image_embeddings)
-        added_time_ids_batches = cls._split_input_into_batches(added_time_ids, batch_size, num_dummy_samples, negative_added_time_ids)
+        image_embeddings_batches = cls._split_input_into_batches(
+            image_embeddings, batch_size, num_dummy_samples, negative_image_embeddings
+        )
+        added_time_ids_batches = cls._split_input_into_batches(
+            added_time_ids, batch_size, num_dummy_samples, negative_added_time_ids
+        )
 
-        return latents_batches, image_latents_batches, image_embeddings_batches, added_time_ids_batches, num_dummy_samples
+        return (
+            latents_batches,
+            image_latents_batches,
+            image_embeddings_batches,
+            added_time_ids_batches,
+            num_dummy_samples,
+        )
 
     @torch.no_grad()
     def __call__(
@@ -511,337 +505,241 @@ class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline):
         export_to_video(frames, "generated.mp4", fps=7)
         ```
         """
-        # 0. Default height and width to unet
-        height = height or self.unet.config.sample_size * self.vae_scale_factor
-        width = width or self.unet.config.sample_size * self.vae_scale_factor
 
-        num_frames = num_frames if num_frames is not None else self.unet.config.num_frames
-        decode_chunk_size = decode_chunk_size if decode_chunk_size is not None else num_frames
+        with torch.autocast(device_type="hpu", dtype=torch.bfloat16, enabled=self.gaudi_config.use_torch_autocast):
+            # 0. Default height and width to unet
+            height = height or self.unet.config.sample_size * self.vae_scale_factor
+            width = width or self.unet.config.sample_size * self.vae_scale_factor
 
-        # 1. Check inputs. Raise error if not correct
-        self.check_inputs(image, height, width)
+            num_frames = num_frames if num_frames is not None else self.unet.config.num_frames
+            decode_chunk_size = decode_chunk_size if decode_chunk_size is not None else num_frames
 
-        # 2. Define call parameters
-        if isinstance(image, PIL.Image.Image):
-            num_images = 1
-        elif isinstance(image, list):
-            num_images = len(image)
-        else:
-            num_images = image.shape[0]
-        num_batches = ceil((num_videos_per_prompt * num_images) / batch_size)
-        logger.info(
-            f"{num_images} image(s) received, {num_videos_per_prompt} video(s) per prompt,"
-            f" {batch_size} sample(s) per batch, {num_batches} total batch(es)."
-        )
-        if num_batches < 3:
-            logger.warning("The first two iterations are slower so it is recommended to feed more batches.")
+            # 1. Check inputs. Raise error if not correct
+            self.check_inputs(image, height, width)
 
-        device = self._execution_device
-        # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
-        # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
-        # corresponds to doing no classifier free guidance.
-        do_classifier_free_guidance = max_guidance_scale > 1.0
-
-        # 3. Encode input image
-        image_embeddings = self._encode_image(
-            image,
-            device,
-            num_videos_per_prompt,
-            do_classifier_free_guidance
-        )
-
-        # NOTE: Stable Diffusion Video was conditioned on fps - 1, which
-        # is why it is reduced here.
-        # See: https://github.com/Stability-AI/generative-models/blob/ed0997173f98eaf8f4edf7ba5fe8f15c6b877fd3/scripts/sampling/simple_video_sample.py#L188
-        fps = fps - 1
-
-        # 4. Encode input image using VAE
-        image = self.image_processor.preprocess(image, height=height, width=width)
-        noise = randn_tensor(image.shape, generator=generator, device=image.device, dtype=image.dtype)
-        image = image + noise_aug_strength * noise
-
-        needs_upcasting = self.vae.dtype == torch.float16 and self.vae.config.force_upcast
-        if needs_upcasting:
-            self.vae.to(dtype=torch.float32)
-
-        # Only encode the conditional image latents and generate unconditional image latents during batch split
-        # The tiling of conditional and unconditional image latents requires special handling
-        image_latents = self._encode_vae_image(
-            image,
-            device,
-            num_videos_per_prompt,
-            do_classifier_free_guidance=False # Override to return only conditional latents
-        )
-        image_latents = image_latents.to(image_embeddings.dtype)
-
-        # cast back to fp16 if needed
-        if needs_upcasting:
-            self.vae.to(dtype=torch.float16)
-
-        # Repeat the image latents for each frame so we can concatenate them with the noise
-        # image_latents [batch, channels, height, width] ->[batch, num_frames, channels, height, width]
-        image_latents = image_latents.unsqueeze(1).repeat(1, num_frames, 1, 1, 1)
-
-        # 5. Get Added Time IDs
-        added_time_ids = self._get_add_time_ids(
-            fps,
-            motion_bucket_id,
-            noise_aug_strength,
-            image_embeddings.dtype,
-            num_images,
-            num_videos_per_prompt,
-            do_classifier_free_guidance,
-        )
-        added_time_ids = added_time_ids.to(device)
-
-        # 4. Prepare timesteps
-        self.scheduler.set_timesteps(num_inference_steps, device=device)
-        timesteps = self.scheduler.timesteps
-        self.scheduler.reset_timestep_dependent_params()
-
-        # 5. Prepare latent variables
-        num_channels_latents = self.unet.config.in_channels
-        latents = self.prepare_latents(
-            num_images * num_videos_per_prompt,
-            num_frames,
-            num_channels_latents,
-            height,
-            width,
-            image_embeddings.dtype,
-            device,
-            generator,
-            latents,
-        )
-
-        # 7. Prepare guidance scale
-        guidance_scale = torch.linspace(min_guidance_scale, max_guidance_scale, num_frames).unsqueeze(0)
-        guidance_scale = guidance_scale.to(device, latents.dtype)
-        guidance_scale = guidance_scale.repeat(batch_size, 1)
-        guidance_scale = _append_dims(guidance_scale, latents.ndim)
-
-        self._guidance_scale = guidance_scale
-
-        # 8. Split into batches (HPU-specific step)
-        latents_batches, image_latents_batches, image_embeddings_batches, added_time_ids_batches, num_dummy_samples = self._split_inputs_into_batches(
-            batch_size,
-            latents,
-            image_latents,
-            image_embeddings,
-            added_time_ids,
-            num_images,
-            do_classifier_free_guidance
-        )
-
-        outputs = {
-            "frames": [],
-        }
-        t0 = time.time()
-        t1 = t0
-
-        # 9. Denoising loop
-        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-        self._num_timesteps = len(timesteps)
-        for j in self.progress_bar(range(num_batches)):
-            # The throughput is calculated from the 3rd iteration
-            # because compilation occurs in the first two iterations
-            if j == 2:
-                t1 = time.time()
-
-            latents_batch = latents_batches[0]
-            latents_batches = torch.roll(latents_batches, shifts=-1, dims=0)
-            image_latents_batch = image_latents_batches[0]
-            image_latents_batches = torch.roll(image_latents_batches, shifts=-1, dims=0)
-            image_embeddings_batch = image_embeddings_batches[0]
-            image_embeddings_batches = torch.roll(image_embeddings_batches, shifts=-1, dims=0)
-            added_time_ids_batch = added_time_ids_batches[0]
-            added_time_ids_batches = torch.roll(added_time_ids_batches, shifts=-1, dims=0)
-
-            for i in range(num_inference_steps):
-                timestep = timesteps[0]
-                timesteps = torch.roll(timesteps, shifts=-1, dims=0)
-
-                # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents_batch] * 2) if do_classifier_free_guidance else latents_batch
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, timestep)
-
-                # Concatenate image_latents over channels dimention
-                latent_model_input = torch.cat([latent_model_input, image_latents_batch], dim=2)
-
-                # predict the noise residual
-                noise_pred = self.unet(
-                    latent_model_input,
-                    timestep,
-                    encoder_hidden_states=image_embeddings_batch,
-                    added_time_ids=added_time_ids_batch,
-                    return_dict=False,
-                )[0]
-
-                # perform guidance
-                if do_classifier_free_guidance:
-                    noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
-                # compute the previous noisy sample x_t -> x_t-1
-                latents_batch = self.scheduler.step(noise_pred, timestep, latents_batch).prev_sample
-
-                if callback_on_step_end is not None:
-                    callback_kwargs = {}
-                    for k in callback_on_step_end_tensor_inputs:
-                        callback_kwargs[k] = locals()[k]
-                    callback_outputs = callback_on_step_end(self, i, timestep, callback_kwargs)
-
-                    latents_batch = callback_outputs.pop("latents", latents_batch)
-
-            if not output_type == "latent":
-                # cast back to fp16 if needed
-                if needs_upcasting:
-                    self.vae.to(dtype=torch.float16)
-                frames = self.decode_latents(latents_batch, num_frames, decode_chunk_size)
-                frames = tensor2vid(frames, self.image_processor, output_type=output_type)
+            # 2. Define call parameters
+            if isinstance(image, PIL.Image.Image):
+                num_images = 1
+            elif isinstance(image, list):
+                num_images = len(image)
             else:
-                frames = latents_batch
+                num_images = image.shape[0]
+            num_batches = ceil((num_videos_per_prompt * num_images) / batch_size)
+            logger.info(
+                f"{num_images} image(s) received, {num_videos_per_prompt} video(s) per prompt,"
+                f" {batch_size} sample(s) per batch, {num_batches} total batch(es)."
+            )
+            if num_batches < 3:
+                logger.warning("The first two iterations are slower so it is recommended to feed more batches.")
 
-            outputs["frames"].append(frames)
+            device = self._execution_device
+            # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
+            # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
+            # corresponds to doing no classifier free guidance.
+            do_classifier_free_guidance = max_guidance_scale > 1.0
 
-        speed_metrics_prefix = "generation"
-        speed_measures = speed_metrics(
-            split=speed_metrics_prefix,
-            start_time=t0,
-            num_samples=num_batches * batch_size if t1 == t0 else (num_batches - 2) * batch_size,
-            num_steps=num_batches,
-            start_time_after_warmup=t1,
-        )
-        logger.info(f"Speed metrics: {speed_measures}")
+            # 3. Encode input image
+            image_embeddings = self._encode_image(image, device, num_videos_per_prompt, do_classifier_free_guidance)
 
-        # Remove dummy generations if needed
-        if num_dummy_samples > 0:
-            outputs["frames"][-1] = outputs["frames"][-1][:-num_dummy_samples]
+            # NOTE: Stable Diffusion Video was conditioned on fps - 1, which
+            # is why it is reduced here.
+            # See: https://github.com/Stability-AI/generative-models/blob/ed0997173f98eaf8f4edf7ba5fe8f15c6b877fd3/scripts/sampling/simple_video_sample.py#L188
+            fps = fps - 1
 
-        # Process generated images
-        for i, frames in enumerate(outputs["frames"][:]):
-            if i == 0:
-                outputs["frames"].clear()
+            # 4. Encode input image using VAE
+            image = self.image_processor.preprocess(image, height=height, width=width)
+            # torch.randn is broken on HPU so running it on CPU
+            rand_device = "cpu" if device.type == "hpu" else device
+            noise = randn_tensor(image.shape, generator=generator, device=rand_device, dtype=image.dtype).to(device)
 
-            if output_type == "pil":
-                outputs["frames"] += frames
-            else:
-                outputs["frames"] += [*frames]
+            image = image + noise_aug_strength * noise
 
-        self.maybe_free_model_hooks()
+            needs_upcasting = (
+                self.vae.dtype == torch.float16 or self.vae.dtype == torch.bfloat16
+            ) and self.vae.config.force_upcast
 
-        if not return_dict:
-            return outputs["frames"]
+            if needs_upcasting:
+                cast_dtype = self.vae.dtype
+                self.vae.to(dtype=torch.float32)
 
-        return GaudiStableVideoDiffusionPipelineOutput(
-            frames=outputs["frames"],
-            throughput=speed_measures[f"{speed_metrics_prefix}_samples_per_second"],
-        )
+            # Only encode the conditional image latents and generate unconditional image latents during batch split
+            # The tiling of conditional and unconditional image latents requires special handling
+            image_latents = self._encode_vae_image(
+                image,
+                device,
+                num_videos_per_prompt,
+                do_classifier_free_guidance=False,  # Override to return only conditional latents
+            )
+            image_latents = image_latents.to(image_embeddings.dtype)
 
+            # cast back to fp16/bf16 if needed
+            if needs_upcasting:
+                self.vae.to(dtype=cast_dtype)
 
-# resizing utils
-# TODO: clean up later
-def _resize_with_antialiasing(input, size, interpolation="bicubic", align_corners=True):
-    h, w = input.shape[-2:]
-    factors = (h / size[0], w / size[1])
+            # Repeat the image latents for each frame so we can concatenate them with the noise
+            # image_latents [batch, channels, height, width] ->[batch, num_frames, channels, height, width]
+            image_latents = image_latents.unsqueeze(1).repeat(1, num_frames, 1, 1, 1)
 
-    # First, we have to determine sigma
-    # Taken from skimage: https://github.com/scikit-image/scikit-image/blob/v0.19.2/skimage/transform/_warps.py#L171
-    sigmas = (
-        max((factors[0] - 1.0) / 2.0, 0.001),
-        max((factors[1] - 1.0) / 2.0, 0.001),
-    )
+            # 5. Get Added Time IDs
+            added_time_ids = self._get_add_time_ids(
+                fps,
+                motion_bucket_id,
+                noise_aug_strength,
+                image_embeddings.dtype,
+                num_images,
+                num_videos_per_prompt,
+                do_classifier_free_guidance,
+            )
+            added_time_ids = added_time_ids.to(device)
 
-    # Now kernel size. Good results are for 3 sigma, but that is kind of slow. Pillow uses 1 sigma
-    # https://github.com/python-pillow/Pillow/blob/master/src/libImaging/Resample.c#L206
-    # But they do it in the 2 passes, which gives better results. Let's try 2 sigmas for now
-    ks = int(max(2.0 * 2 * sigmas[0], 3)), int(max(2.0 * 2 * sigmas[1], 3))
+            # 6 Prepare timesteps
+            self.scheduler.set_timesteps(num_inference_steps, device=device)
+            timesteps = self.scheduler.timesteps
+            self.scheduler.reset_timestep_dependent_params()
 
-    # Make sure it is odd
-    if (ks[0] % 2) == 0:
-        ks = ks[0] + 1, ks[1]
+            # 7 Prepare latent variables
+            num_channels_latents = self.unet.config.in_channels
+            latents = self.prepare_latents(
+                num_images * num_videos_per_prompt,
+                num_frames,
+                num_channels_latents,
+                height,
+                width,
+                image_embeddings.dtype,
+                device,
+                generator,
+                latents,
+            )
 
-    if (ks[1] % 2) == 0:
-        ks = ks[0], ks[1] + 1
+            # 8. Prepare guidance scale
+            guidance_scale = torch.linspace(min_guidance_scale, max_guidance_scale, num_frames).unsqueeze(0)
+            guidance_scale = guidance_scale.to(device, latents.dtype)
+            guidance_scale = guidance_scale.repeat(batch_size, 1)
+            guidance_scale = _append_dims(guidance_scale, latents.ndim)
 
-    input = _gaussian_blur2d(input, ks, sigmas)
+            self._guidance_scale = guidance_scale
 
-    output = torch.nn.functional.interpolate(input, size=size, mode=interpolation, align_corners=align_corners)
-    return output
+            # 9. Split into batches (HPU-specific step)
+            (
+                latents_batches,
+                image_latents_batches,
+                image_embeddings_batches,
+                added_time_ids_batches,
+                num_dummy_samples,
+            ) = self._split_inputs_into_batches(
+                batch_size,
+                latents,
+                image_latents,
+                image_embeddings,
+                added_time_ids,
+                num_images,
+                do_classifier_free_guidance,
+            )
 
+            outputs = {
+                "frames": [],
+            }
+            t0 = time.time()
+            t1 = t0
 
-def _compute_padding(kernel_size):
-    """Compute padding tuple."""
-    # 4 or 6 ints:  (padding_left, padding_right,padding_top,padding_bottom)
-    # https://pytorch.org/docs/stable/nn.html#torch.nn.functional.pad
-    if len(kernel_size) < 2:
-        raise AssertionError(kernel_size)
-    computed = [k - 1 for k in kernel_size]
+            # 10. Denoising loop
+            num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+            self._num_timesteps = len(timesteps)
+            for j in self.progress_bar(range(num_batches)):
+                # The throughput is calculated from the 3rd iteration
+                # because compilation occurs in the first two iterations
+                if j == 2:
+                    t1 = time.time()
 
-    # for even kernels we need to do asymmetric padding :(
-    out_padding = 2 * len(kernel_size) * [0]
+                latents_batch = latents_batches[0]
+                latents_batches = torch.roll(latents_batches, shifts=-1, dims=0)
+                image_latents_batch = image_latents_batches[0]
+                image_latents_batches = torch.roll(image_latents_batches, shifts=-1, dims=0)
+                image_embeddings_batch = image_embeddings_batches[0]
+                image_embeddings_batches = torch.roll(image_embeddings_batches, shifts=-1, dims=0)
+                added_time_ids_batch = added_time_ids_batches[0]
+                added_time_ids_batches = torch.roll(added_time_ids_batches, shifts=-1, dims=0)
 
-    for i in range(len(kernel_size)):
-        computed_tmp = computed[-(i + 1)]
+                for i in self.progress_bar(range(num_inference_steps)):
+                    timestep = timesteps[0]
+                    timesteps = torch.roll(timesteps, shifts=-1, dims=0)
 
-        pad_front = computed_tmp // 2
-        pad_rear = computed_tmp - pad_front
+                    # expand the latents if we are doing classifier free guidance
+                    latent_model_input = (
+                        torch.cat([latents_batch] * 2) if do_classifier_free_guidance else latents_batch
+                    )
+                    latent_model_input = self.scheduler.scale_model_input(latent_model_input, timestep)
 
-        out_padding[2 * i + 0] = pad_front
-        out_padding[2 * i + 1] = pad_rear
+                    # Concatenate image_latents over channels dimention
+                    latent_model_input = torch.cat([latent_model_input, image_latents_batch], dim=2)
 
-    return out_padding
+                    # predict the noise residual
+                    noise_pred = self.unet(
+                        latent_model_input,
+                        timestep,
+                        encoder_hidden_states=image_embeddings_batch,
+                        added_time_ids=added_time_ids_batch,
+                        return_dict=False,
+                    )[0]
 
+                    # perform guidance
+                    if do_classifier_free_guidance:
+                        noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+                        noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
-def _filter2d(input, kernel):
-    # prepare kernel
-    b, c, h, w = input.shape
-    tmp_kernel = kernel[:, None, ...].to(device=input.device, dtype=input.dtype)
+                    # compute the previous noisy sample x_t -> x_t-1
+                    latents_batch = self.scheduler.step(noise_pred, timestep, latents_batch).prev_sample
 
-    tmp_kernel = tmp_kernel.expand(-1, c, -1, -1)
+                    if callback_on_step_end is not None:
+                        callback_kwargs = {}
+                        for k in callback_on_step_end_tensor_inputs:
+                            callback_kwargs[k] = locals()[k]
+                        callback_outputs = callback_on_step_end(self, i, timestep, callback_kwargs)
 
-    height, width = tmp_kernel.shape[-2:]
+                        latents_batch = callback_outputs.pop("latents", latents_batch)
 
-    padding_shape: list[int] = _compute_padding([height, width])
-    input = torch.nn.functional.pad(input, padding_shape, mode="reflect")
+                if not output_type == "latent":
+                    # cast back to fp16/bf16 if needed
+                    if needs_upcasting:
+                        self.vae.to(dtype=cast_dtype)
 
-    # kernel and input tensor reshape to align element-wise or batch-wise params
-    tmp_kernel = tmp_kernel.reshape(-1, 1, height, width)
-    input = input.view(-1, tmp_kernel.size(0), input.size(-2), input.size(-1))
+                    frames = self.decode_latents(latents_batch, num_frames, decode_chunk_size)
+                    frames = tensor2vid(frames, self.image_processor, output_type=output_type)
+                else:
+                    frames = latents_batch
 
-    # convolve the tensor with the kernel.
-    output = torch.nn.functional.conv2d(input, tmp_kernel, groups=tmp_kernel.size(0), padding=0, stride=1)
+                outputs["frames"].append(frames)
 
-    out = output.view(b, c, h, w)
-    return out
+            speed_metrics_prefix = "generation"
+            speed_measures = speed_metrics(
+                split=speed_metrics_prefix,
+                start_time=t0,
+                num_samples=num_batches * batch_size if t1 == t0 else (num_batches - 2) * batch_size,
+                num_steps=num_batches,
+                start_time_after_warmup=t1,
+            )
+            logger.info(f"Speed metrics: {speed_measures}")
 
+            # Remove dummy generations if needed
+            if num_dummy_samples > 0:
+                outputs["frames"][-1] = outputs["frames"][-1][:-num_dummy_samples]
 
-def _gaussian(window_size: int, sigma):
-    if isinstance(sigma, float):
-        sigma = torch.tensor([[sigma]])
+            # Process generated images
+            for i, frames in enumerate(outputs["frames"][:]):
+                if i == 0:
+                    outputs["frames"].clear()
 
-    batch_size = sigma.shape[0]
+                if output_type == "pil":
+                    outputs["frames"] += frames
+                else:
+                    outputs["frames"] += [*frames]
 
-    x = (torch.arange(window_size, device=sigma.device, dtype=sigma.dtype) - window_size // 2).expand(batch_size, -1)
+            self.maybe_free_model_hooks()
 
-    if window_size % 2 == 0:
-        x = x + 0.5
+            if not return_dict:
+                return outputs["frames"]
 
-    gauss = torch.exp(-x.pow(2.0) / (2 * sigma.pow(2.0)))
-
-    return gauss / gauss.sum(-1, keepdim=True)
-
-
-def _gaussian_blur2d(input, kernel_size, sigma):
-    if isinstance(sigma, tuple):
-        sigma = torch.tensor([sigma], dtype=input.dtype)
-    else:
-        sigma = sigma.to(dtype=input.dtype)
-
-    ky, kx = int(kernel_size[0]), int(kernel_size[1])
-    bs = sigma.shape[0]
-    kernel_x = _gaussian(kx, sigma[:, 1].view(bs, 1))
-    kernel_y = _gaussian(ky, sigma[:, 0].view(bs, 1))
-    out_x = _filter2d(input, kernel_x[..., None, :])
-    out = _filter2d(out_x, kernel_y[..., None])
-
-    return out
+            return GaudiStableVideoDiffusionPipelineOutput(
+                frames=outputs["frames"],
+                throughput=speed_measures[f"{speed_metrics_prefix}_samples_per_second"],
+            )

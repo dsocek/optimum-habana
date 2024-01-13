@@ -19,8 +19,8 @@ import sys
 from pathlib import Path
 
 import torch
+from diffusers.utils import export_to_video, load_image
 
-from diffusers.utils import load_image, export_to_video
 from optimum.habana.diffusers import GaudiEulerDiscreteScheduler
 from optimum.habana.utils import set_seed
 
@@ -98,25 +98,28 @@ def main():
         "--motion_bucket_id",
         type=int,
         default=127,
-        help=("The motion bucket ID. Used as conditioning for the generation. The higher the number the more motion"
-              " will be in the video."
+        help=(
+            "The motion bucket ID. Used as conditioning for the generation. The higher the number the more motion"
+            " will be in the video."
         ),
     )
     parser.add_argument(
         "--noise_aug_strength",
         type=float,
         default=0.02,
-        help=("The amount of noise added to the init image, the higher it is the less the video will look like the"
-              " init image. Increase it for more motion."
+        help=(
+            "The amount of noise added to the init image, the higher it is the less the video will look like the"
+            " init image. Increase it for more motion."
         ),
     )
     parser.add_argument(
         "--decode_chunk_size",
         type=int,
         default=None,
-        help=("The number of frames to decode at a time. The higher the chunk size, the higher the temporal consistency"
-              " between frames, but also the higher the memory consumption. By default, the decoder will decode all"
-              " frames at once for maximal quality. Reduce `decode_chunk_size` to reduce memory usage."
+        help=(
+            "The number of frames to decode at a time. The higher the chunk size, the higher the temporal consistency"
+            " between frames, but also the higher the memory consumption. By default, the decoder will decode all"
+            " frames at once for maximal quality. Reduce `decode_chunk_size` to reduce memory usage."
         ),
     )
     parser.add_argument(

@@ -1,10 +1,8 @@
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Tuple, Union
 
 import torch
 from diffusers.models.unet_spatio_temporal_condition import UNetSpatioTemporalConditionOutput
-from diffusers.utils import USE_PEFT_BACKEND, deprecate, scale_lora_layers, unscale_lora_layers, BaseOutput
 
-from dataclasses import dataclass
 from optimum.utils import logging
 
 
@@ -51,7 +49,7 @@ def gaudi_unet_spatio_temporal_condition_model_forward(
             dtype = torch.int32 if is_mps else torch.int64
         timesteps = torch.tensor([timesteps], dtype=dtype, device=sample.device)
     elif len(timesteps.shape) == 0:
-       timesteps = timesteps[None].to(sample.device)
+        timesteps = timesteps[None].to(sample.device)
 
     # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
     batch_size, num_frames = sample.shape[:2]

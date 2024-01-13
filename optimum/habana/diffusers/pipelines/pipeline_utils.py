@@ -124,9 +124,15 @@ class GaudiDiffusionPipeline(DiffusionPipeline):
             if bf16_full_eval or self.gaudi_config.use_torch_autocast:
                 import diffusers
 
-                from ..models import gaudi_unet_2d_condition_model_forward
+                from ..models import (
+                    gaudi_unet_2d_condition_model_forward,
+                    gaudi_unet_spatio_temporal_condition_model_forward,
+                )
 
                 diffusers.models.unet_2d_condition.UNet2DConditionModel.forward = gaudi_unet_2d_condition_model_forward
+                diffusers.models.unet_spatio_temporal_condition.UNetSpatioTemporalConditionModel.forward = (
+                    gaudi_unet_spatio_temporal_condition_model_forward
+                )
 
             if self.use_hpu_graphs:
                 try:

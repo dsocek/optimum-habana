@@ -16,9 +16,9 @@
 
 import json
 import os
+import random
 import re
 import subprocess
-import random
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -27,35 +27,32 @@ from unittest import TestCase
 import numpy as np
 import requests
 import torch
-from diffusers import AutoencoderKL, UNet2DConditionModel
-from huggingface_hub import snapshot_download
-
-from transformers import (
-    CLIPImageProcessor,
-    CLIPVisionConfig,
-    CLIPVisionModelWithProjection,
-)
-
 from diffusers import (
     AutoencoderKL,
     AutoencoderKLTemporalDecoder,
     UNet2DConditionModel,
     UNetSpatioTemporalConditionModel,
-    EulerDiscreteScheduler
 )
 from diffusers.utils.testing_utils import (
     floats_tensor,
 )
-
+from huggingface_hub import snapshot_download
 from parameterized import parameterized
 from PIL import Image
-from transformers import CLIPTextConfig, CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
+from transformers import (
+    CLIPImageProcessor,
+    CLIPTextConfig,
+    CLIPTextModel,
+    CLIPTextModelWithProjection,
+    CLIPTokenizer,
+    CLIPVisionConfig,
+    CLIPVisionModelWithProjection,
+)
 from transformers.testing_utils import slow
 
 from optimum.habana import GaudiConfig
 from optimum.habana.diffusers import (
     GaudiDDIMScheduler,
-    GaudiEulerDiscreteScheduler,
     GaudiDiffusionPipeline,
     GaudiEulerAncestralDiscreteScheduler,
     GaudiEulerDiscreteScheduler,
@@ -63,7 +60,7 @@ from optimum.habana.diffusers import (
     GaudiStableDiffusionPipeline,
     GaudiStableDiffusionUpscalePipeline,
     GaudiStableDiffusionXLPipeline,
-    GaudiStableVideoDiffusionPipeline
+    GaudiStableVideoDiffusionPipeline,
 )
 from optimum.habana.utils import set_seed
 
@@ -869,49 +866,6 @@ class GaudiStableDiffusionXLPipelineTester(TestCase):
         )
         torch.manual_seed(0)
         vae = AutoencoderKL(
-
-class GaudiStableVideoDiffusionPipelineTester(TestCase):
-    """
-    Tests the StableVideoDiffusionPipeline for Gaudi.
-    Adapted from: https://github.com/huggingface/diffusers/blob/v0.24.0-release/tests/pipelines/stable_video_diffusion/test_stable_video_diffusion.py
-    """
-
-    def get_dummy_components(self):
-        torch.manual_seed(0)
-        unet = UNetSpatioTemporalConditionModel(
-            block_out_channels=(32, 64),
-            layers_per_block=2,
-            sample_size=32,
-            in_channels=8,
-            out_channels=4,
-            down_block_types=(
-                "CrossAttnDownBlockSpatioTemporal",
-                "DownBlockSpatioTemporal",
-            ),
-            up_block_types=("UpBlockSpatioTemporal", "CrossAttnUpBlockSpatioTemporal"),
-            cross_attention_dim=32,
-            num_attention_heads=8,
-            projection_class_embeddings_input_dim=96,
-            addition_time_embed_dim=32,
-        )
-        scheduler = GaudiEulerDiscreteScheduler(
-            beta_start=0.00085,
-            beta_end=0.012,
-            beta_schedule="scaled_linear",
-            interpolation_type="linear",
-            num_train_timesteps=1000,
-            prediction_type="v_prediction",
-            sigma_max=700.0,
-            sigma_min=0.002,
-            steps_offset=1,
-            timestep_spacing="leading",
-            timestep_type="continuous",
-            trained_betas=None,
-            use_karras_sigmas=True,
-        )
-
-        torch.manual_seed(0)
-        vae = AutoencoderKLTemporalDecoder(
             block_out_channels=[32, 64],
             in_channels=3,
             out_channels=3,
@@ -949,29 +903,6 @@ class GaudiStableVideoDiffusionPipelineTester(TestCase):
             "tokenizer": tokenizer,
             "text_encoder_2": text_encoder_2,
             "tokenizer_2": tokenizer_2,
-            latent_channels=4,
-        )
-
-        torch.manual_seed(0)
-        config = CLIPVisionConfig(
-            hidden_size=32,
-            projection_dim=32,
-            num_hidden_layers=5,
-            num_attention_heads=4,
-            image_size=32,
-            intermediate_size=37,
-            patch_size=1,
-        )
-        image_encoder = CLIPVisionModelWithProjection(config)
-
-        torch.manual_seed(0)
-        feature_extractor = CLIPImageProcessor(crop_size=32, size=32)
-        components = {
-            "unet": unet,
-            "image_encoder": image_encoder,
-            "scheduler": scheduler,
-            "vae": vae,
-            "feature_extractor": feature_extractor,
         }
         return components
 
@@ -1223,6 +1154,81 @@ class GaudiStableVideoDiffusionPipelineTester(TestCase):
 
         self.assertEqual(len(images), 10)
         self.assertEqual(images[-1].shape, (64, 64, 3))
+
+
+class GaudiStableVideoDiffusionPipelineTester(TestCase):
+    """
+    Tests the StableVideoDiffusionPipeline for Gaudi.
+    Adapted from: https://github.com/huggingface/diffusers/blob/v0.24.0-release/tests/pipelines/stable_video_diffusion/test_stable_video_diffusion.py
+    """
+
+    def get_dummy_components(self):
+        torch.manual_seed(0)
+        unet = UNetSpatioTemporalConditionModel(
+            block_out_channels=(32, 64),
+            layers_per_block=2,
+            sample_size=32,
+            in_channels=8,
+            out_channels=4,
+            down_block_types=(
+                "CrossAttnDownBlockSpatioTemporal",
+                "DownBlockSpatioTemporal",
+            ),
+            up_block_types=("UpBlockSpatioTemporal", "CrossAttnUpBlockSpatioTemporal"),
+            cross_attention_dim=32,
+            num_attention_heads=8,
+            projection_class_embeddings_input_dim=96,
+            addition_time_embed_dim=32,
+        )
+        scheduler = GaudiEulerDiscreteScheduler(
+            beta_start=0.00085,
+            beta_end=0.012,
+            beta_schedule="scaled_linear",
+            interpolation_type="linear",
+            num_train_timesteps=1000,
+            prediction_type="v_prediction",
+            sigma_max=700.0,
+            sigma_min=0.002,
+            steps_offset=1,
+            timestep_spacing="leading",
+            timestep_type="continuous",
+            trained_betas=None,
+            use_karras_sigmas=True,
+        )
+
+        torch.manual_seed(0)
+        vae = AutoencoderKLTemporalDecoder(
+            block_out_channels=[32, 64],
+            in_channels=3,
+            out_channels=3,
+            down_block_types=["DownEncoderBlock2D", "DownEncoderBlock2D"],
+            latent_channels=4,
+        )
+
+        torch.manual_seed(0)
+        config = CLIPVisionConfig(
+            hidden_size=32,
+            projection_dim=32,
+            num_hidden_layers=5,
+            num_attention_heads=4,
+            image_size=32,
+            intermediate_size=37,
+            patch_size=1,
+        )
+        image_encoder = CLIPVisionModelWithProjection(config)
+
+        torch.manual_seed(0)
+        feature_extractor = CLIPImageProcessor(crop_size=32, size=32)
+        components = {
+            "unet": unet,
+            "image_encoder": image_encoder,
+            "scheduler": scheduler,
+            "vae": vae,
+            "feature_extractor": feature_extractor,
+        }
+        return components
+
+    def get_dummy_inputs(self, device, seed=0):
         if str(device).startswith("mps"):
             generator = torch.manual_seed(seed)
         else:
@@ -1245,12 +1251,8 @@ class GaudiStableVideoDiffusionPipelineTester(TestCase):
     def test_stable_video_diffusion_single_video(self):
         device = "cpu"  # ensure determinism for the device-dependent torch.Generator
         components = self.get_dummy_components()
-        #gaudi_config = GaudiConfig(use_torch_autocast=False)
-        sd_pipe = GaudiStableVideoDiffusionPipeline(
-            # use_habana=True,
-            # gaudi_config=gaudi_config,
-            **components
-        )
+        gaudi_config = GaudiConfig(use_torch_autocast=False)
+        sd_pipe = GaudiStableVideoDiffusionPipeline(use_habana=True, gaudi_config=gaudi_config, **components)
         for component in sd_pipe.components.values():
             if hasattr(component, "set_default_attn_processor"):
                 component.set_default_attn_processor()
@@ -1258,7 +1260,9 @@ class GaudiStableVideoDiffusionPipelineTester(TestCase):
         sd_pipe.to(device)
         sd_pipe.set_progress_bar_config(disable=None)
 
-        outputs = sd_pipe(**self.get_dummy_inputs(device),).frames
+        outputs = sd_pipe(
+            **self.get_dummy_inputs(device),
+        ).frames
         image = outputs[0]
         image_slice = image[0, -3:, -3:, -1]
 
@@ -1273,11 +1277,7 @@ class GaudiStableVideoDiffusionPipelineTester(TestCase):
         device = "cpu"  # ensure determinism for the device-dependent torch.Generator
         components = self.get_dummy_components()
         gaudi_config = GaudiConfig(use_torch_autocast=False)
-        sd_pipe = GaudiStableVideoDiffusionPipeline(
-            # use_habana=True,
-            # gaudi_config=gaudi_config,
-            **components
-        )
+        sd_pipe = GaudiStableVideoDiffusionPipeline(use_habana=True, gaudi_config=gaudi_config, **components)
         for component in sd_pipe.components.values():
             if hasattr(component, "set_default_attn_processor"):
                 component.set_default_attn_processor()
@@ -1311,9 +1311,7 @@ class GaudiStableVideoDiffusionPipelineTester(TestCase):
         num_videos_per_prompt = 7
 
         outputs = sd_pipe(
-            **self.get_dummy_inputs(device),
-            num_videos_per_prompt=num_videos_per_prompt,
-            batch_size=batch_size
+            **self.get_dummy_inputs(device), num_videos_per_prompt=num_videos_per_prompt, batch_size=batch_size
         ).frames
         image = outputs[0]
         image_slice = image[0, -3:, -3:, -1]
@@ -1329,11 +1327,7 @@ class GaudiStableVideoDiffusionPipelineTester(TestCase):
         # Same test without classifier-free guidance
         inputs = self.get_dummy_inputs(device)
         inputs["max_guidance_scale"] = 1.0
-        outputs = sd_pipe(
-            **inputs,
-            num_videos_per_prompt=num_videos_per_prompt,
-            batch_size=batch_size
-        ).frames
+        outputs = sd_pipe(**inputs, num_videos_per_prompt=num_videos_per_prompt, batch_size=batch_size).frames
         image = outputs[0]
         image_slice = image[0, -3:, -3:, -1]
 
@@ -1353,11 +1347,7 @@ class GaudiStableVideoDiffusionPipelineTester(TestCase):
 
         inputs = self.get_dummy_inputs(device)
         inputs["image"] = inputs["image"].repeat(num_images, 1, 1, 1)
-        outputs = sd_pipe(
-            **inputs,
-            num_videos_per_prompt=num_videos_per_prompt,
-            batch_size=batch_size
-        ).frames
+        outputs = sd_pipe(**inputs, num_videos_per_prompt=num_videos_per_prompt, batch_size=batch_size).frames
         image = outputs[0]
         image_slice = image[0, -3:, -3:, -1]
 
@@ -1368,4 +1358,3 @@ class GaudiStableVideoDiffusionPipelineTester(TestCase):
         expected_slice = np.array([0.5026, 0.5873, 0.5591, 0.6236, 0.6200, 0.6158, 0.5214, 0.5603, 0.5245])
 
         self.assertLess(np.abs(image_slice.flatten() - expected_slice).max(), 1e-2)
-
