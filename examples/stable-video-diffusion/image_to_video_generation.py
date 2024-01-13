@@ -141,6 +141,11 @@ def main():
         default="./stable-video-diffusion-generated-frames",
         help="The directory where frames will be saved.",
     )
+    parser.add_argument(
+        "--save_frames_as_images",
+        action="store_true",
+        help="Save output frames as images",
+    )
 
     parser.add_argument("--seed", type=int, default=42, help="Random seed for initialization.")
 
@@ -193,12 +198,14 @@ def main():
 
     # Load input image(s)
     input = []
+    print("Input image(s):")
     if isinstance(args.image_path, str):
         args.image_path = [args.image_path]
     for image_path in args.image_path:
         image = load_image(image_path)
         image = image.resize((args.height, args.width))
         input.append(image)
+        print(image_path)
 
     # Generate images
     outputs = pipeline(
@@ -228,7 +235,17 @@ def main():
             video_save_dir.mkdir(parents=True, exist_ok=True)
             logger.info(f"Saving video frames in {video_save_dir.resolve()}...")
             for i, frames in enumerate(outputs.frames):
-                export_to_video(frames, args.video_save_dir + "/generated_" + str(i).zfill(2) + ".mp4", fps=7)
+                export_to_video(frames, args.video_save_dir + "/gen_video_" + str(i).zfill(2) + ".mp4", fps=7)
+                if args.save_frames_as_images:
+                    for j, frame in enumerate(frames):
+                        frame.save(
+                            args.video_save_dir
+                            + "/gen_video_"
+                            + str(i).zfill(2)
+                            + "_frame_"
+                            + str(j).zfill(2)
+                            + ".png"
+                        )
         else:
             logger.warning("--output_type should be equal to 'pil' to save frames in --video_save_dir.")
 

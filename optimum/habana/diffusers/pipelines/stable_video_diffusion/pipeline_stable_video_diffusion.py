@@ -304,6 +304,14 @@ class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline, StableVideoDiffu
         return self._num_timesteps
 
     @classmethod
+    def _pad_batches(cls, input_batches, num_dummy_samples):
+        sequence_to_stack = (input_batches[-1],) + tuple(
+            torch.zeros_like(input_batches[-1][0][None, :]) for _ in range(num_dummy_samples)
+        )
+        input_batches[-1] = torch.vstack(sequence_to_stack)
+        return input_batches
+
+    @classmethod
     def _split_input_into_batches(
         cls,
         cond_input,
@@ -663,6 +671,8 @@ class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline, StableVideoDiffu
                 for i in self.progress_bar(range(num_inference_steps)):
                     timestep = timesteps[0]
                     timesteps = torch.roll(timesteps, shifts=-1, dims=0)
+
+                    capture = True if self.use_hpu_graphs and j == 0 and i < 2 else False
 
                     # expand the latents if we are doing classifier free guidance
                     latent_model_input = (
