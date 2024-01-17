@@ -684,12 +684,12 @@ class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline, StableVideoDiffu
                     latent_model_input = torch.cat([latent_model_input, image_latents_batch], dim=2)
 
                     # predict the noise residual
-                    noise_pred = self.unet(
+                    noise_pred = self.unet_hpu(
                         latent_model_input,
                         timestep,
                         encoder_hidden_states=image_embeddings_batch,
                         added_time_ids=added_time_ids_batch,
-                        return_dict=False,
+                        capture=capture,
                     )[0]
 
                     # perform guidance
@@ -753,3 +753,74 @@ class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline, StableVideoDiffu
                 frames=outputs["frames"],
                 throughput=speed_measures[f"{speed_metrics_prefix}_samples_per_second"],
             )
+
+    @torch.no_grad()
+    def unet_hpu(
+        self,
+        latent_model_input,
+        timestep,
+        encoder_hidden_states,
+        added_time_ids,
+        capture,
+    ):
+        if self.use_hpu_graphs:
+            return self.capture_replay(
+                latent_model_input,
+                timestep,
+                encoder_hidden_states,
+                added_time_ids,
+                capture,
+            )
+        else:
+            return self.unet(
+                latent_model_input,
+                timestep,
+                encoder_hidden_states=encoder_hidden_states,
+                added_time_ids=added_time_ids,
+                return_dict=False,
+            )[0]
+
+    @torch.no_grad()
+    def capture_replay(
+        self,
+        latent_model_input,
+        timestep,
+        encoder_hidden_states,
+        added_time_ids,
+        capture,
+    ):
+        inputs = [
+            latent_model_input,
+            timestep,
+            encoder_hidden_states,
+            added_time_ids,
+        ]
+        h = self.ht.hpu.graphs.input_hash(inputs)
+        cached = self.cache.get(h)
+
+        if capture:
+            # Capture the graph and cache it
+            with self.ht.hpu.stream(self.hpu_stream):
+                graph = self.ht.hpu.HPUGraph()
+                graph.capture_begin()
+
+                outputs = self.unet(
+                    inputs[0],
+                    inputs[1],
+                    encoder_hidden_states=inputs[2],
+                    added_time_ids=inputs[3],
+                    return_dict=False,
+                )[0]
+
+                graph.capture_end()
+                graph_inputs = inputs
+                graph_outputs = outputs
+                self.cache[h] = self.ht.hpu.graphs.CachedParams(graph_inputs, graph_outputs, graph)
+            return outputs
+
+        # Replay the cached graph with updated inputs
+        self.ht.hpu.graphs.copy_to(cached.graph_inputs, inputs)
+        cached.graph.replay()
+        self.ht.core.hpu.default_stream().synchronize()
+
+        return cached.graph_outputs
