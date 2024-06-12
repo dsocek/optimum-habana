@@ -259,7 +259,7 @@ python text_to_image_generation.py \
     --bf16
 ```
 
-Here is how to generate images with conditioned by canny edge model using Stable Diffusion 2
+Here is how to generate images using Stable Diffusion 2 conditioned by canny edge model
 ```bash
 pip install -r requirements.txt
 python text_to_image_generation.py \
@@ -275,6 +275,27 @@ python text_to_image_generation.py \
     --use_habana \
     --use_hpu_graphs \
     --gaudi_config Habana/stable-diffusion-2
+```
+
+Here is how to generate images with Stable Diffusion XL model conditioned by canny edge model:
+```bash
+pip install -r requirements.txt
+PT_HPU_MAX_COMPOUND_OP_SIZE=1 \
+python text_to_image_generation.py \
+    --model_name_or_path stabilityai/stable-diffusion-xl-base-1.0 \
+    --vae_adapter_name_or_path "madebyollin/sdxl-vae-fp16-fix" \
+    --controlnet_model_name_or_path diffusers/controlnet-canny-sdxl-1.0 \
+    --prompts "aerial view, a futuristic research complex in a bright foggy jungle, hard lighting" \
+    --negative_prompts "low quality, bad quality, sketches" \
+    --control_image https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main/sd_controlnet/hf-logo.png \
+    --control_conditioning_scale 0.5 \
+    --num_images_per_prompt 1 \
+    --batch_size 1 \
+    --image_save_dir /tmp/controlnet_images \
+    --use_habana \
+    --use_hpu_graphs \
+    --gaudi_config Habana/stable-diffusion \
+    --bf16
 ```
 
 # Stable Video Diffusion Examples
