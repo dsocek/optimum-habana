@@ -107,6 +107,12 @@ def main():
         ),
     )
     parser.add_argument(
+        "--control_conditioning_scale",
+        type=float,
+        default=1.0,
+        help=("Specifies how strictly to follow the controlnet conditoning image."),
+    )
+    parser.add_argument(
         "--num_images_per_prompt", type=int, default=1, help="The number of images to generate per prompt."
     )
     parser.add_argument("--batch_size", type=int, default=1, help="The number of images in a batch.")
@@ -227,6 +233,12 @@ def main():
         help="Path to pre-trained model",
     )
     parser.add_argument(
+        "--vae_adapter_name_or_path",
+        default=None,
+        type=str,
+        help="Path to pre-trained model",
+    )
+    parser.add_argument(
         "--text_encoder_adapter_name_or_path",
         default=None,
         type=str,
@@ -266,25 +278,28 @@ def main():
     # Import selected pipeline
     sdxl_models = ["stable-diffusion-xl", "sdxl"]
 
-    if args.control_image is not None:
+    controlnet = True if args.control_image is not None else False
+    sdxl = True if any(model in args.model_name_or_path for model in sdxl_models) else False
+
+    if controlnet:
         from diffusers import ControlNetModel
 
-        from optimum.habana.diffusers import GaudiStableDiffusionControlNetPipeline
-
-        sdxl = False
-    elif any(model in args.model_name_or_path for model in sdxl_models):
-        from optimum.habana.diffusers import GaudiStableDiffusionXLPipeline
-
-        sdxl = True
-    else:
-        if args.ldm3d:
-            from optimum.habana.diffusers import GaudiStableDiffusionLDM3DPipeline as GaudiStableDiffusionPipeline
-
-            if args.model_name_or_path == "runwayml/stable-diffusion-v1-5":
-                args.model_name_or_path = "Intel/ldm3d-4c"
+        if sdxl:
+            from optimum.habana.diffusers import GaudiStableDiffusionXLControlNetPipeline
         else:
-            from optimum.habana.diffusers import GaudiStableDiffusionPipeline
-        sdxl = False
+            from optimum.habana.diffusers import GaudiStableDiffusionControlNetPipeline
+
+    else:
+        if sdxl:
+            from optimum.habana.diffusers import GaudiStableDiffusionXLPipeline
+        else:
+            if args.ldm3d:
+                from optimum.habana.diffusers import GaudiStableDiffusionLDM3DPipeline as GaudiStableDiffusionPipeline
+
+                if args.model_name_or_path == "runwayml/stable-diffusion-v1-5":
+                    args.model_name_or_path = "Intel/ldm3d-4c"
+            else:
+                from optimum.habana.diffusers import GaudiStableDiffusionPipeline
 
     # Setup logging
     logging.basicConfig(
@@ -314,6 +329,9 @@ def main():
         "gaudi_config": args.gaudi_config_name,
     }
 
+    if args.vae_adapter_name_or_path is not None:
+        kwargs_call["vae"] = args.vae_adapter_name_or_path
+
     if args.bf16:
         kwargs["torch_dtype"] = torch.bfloat16
 
@@ -321,34 +339,69 @@ def main():
         kwargs_call["throughput_warmup_steps"] = args.throughput_warmup_steps
 
     # Generate images
-    if args.control_image is not None:
-        model_dtype = torch.bfloat16 if args.bf16 else None
-        controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path, torch_dtype=model_dtype)
-        pipeline = GaudiStableDiffusionControlNetPipeline.from_pretrained(
-            args.model_name_or_path,
-            controlnet=controlnet,
-            **kwargs,
-        )
-        if args.lora_id:
-            pipeline.load_lora_weights(args.lora_id)
+    if controlnet:
+        if sdxl:
+            model_dtype = torch.bfloat16 if args.bf16 else None
+            controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path, torch_dtype=model_dtype)
+            pipeline = GaudiStableDiffusionXLControlNetPipeline.from_pretrained(
+                args.model_name_or_path,
+                controlnet=controlnet,
+                **kwargs,
+            )
+            if args.lora_id:
+                pipeline.load_lora_weights(args.lora_id)
 
-        # Set seed before running the model
-        set_seed(args.seed)
+            # Set seed before running the model
+            set_seed(args.seed)
 
-        outputs = pipeline(
-            prompt=args.prompts,
-            image=control_image,
-            num_images_per_prompt=args.num_images_per_prompt,
-            batch_size=args.batch_size,
-            num_inference_steps=args.num_inference_steps,
-            guidance_scale=args.guidance_scale,
-            negative_prompt=args.negative_prompts,
-            eta=args.eta,
-            output_type=args.output_type,
-            profiling_warmup_steps=args.profiling_warmup_steps,
-            profiling_steps=args.profiling_steps,
-            **kwargs_call,
-        )
+            outputs = pipeline(
+                prompt=args.prompts,
+                prompt_2=args.prompts_2,
+                image=control_image,
+                num_images_per_prompt=args.num_images_per_prompt,
+                batch_size=args.batch_size,
+                num_inference_steps=args.num_inference_steps,
+                guidance_scale=args.guidance_scale,
+                negative_prompt=args.negative_prompts,
+                negative_prompt_2=args.negative_prompts_2,
+                controlnet_conditioning_scale=args.control_conditioning_scale,
+                eta=args.eta,
+                output_type=args.output_type,
+                profiling_warmup_steps=args.profiling_warmup_steps,
+                profiling_steps=args.profiling_steps,
+                **kwargs_call,
+            )
+
+        else:
+            model_dtype = torch.bfloat16 if args.bf16 else None
+            controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path, torch_dtype=model_dtype)
+            pipeline = GaudiStableDiffusionControlNetPipeline.from_pretrained(
+                args.model_name_or_path,
+                controlnet=controlnet,
+                **kwargs,
+            )
+            if args.lora_id:
+                pipeline.load_lora_weights(args.lora_id)
+
+            # Set seed before running the model
+            set_seed(args.seed)
+
+            outputs = pipeline(
+                prompt=args.prompts,
+                image=control_image,
+                num_images_per_prompt=args.num_images_per_prompt,
+                batch_size=args.batch_size,
+                num_inference_steps=args.num_inference_steps,
+                guidance_scale=args.guidance_scale,
+                negative_prompt=args.negative_prompts,
+                controlnet_conditioning_scale=args.control_conditioning_scale,
+                eta=args.eta,
+                output_type=args.output_type,
+                profiling_warmup_steps=args.profiling_warmup_steps,
+                profiling_steps=args.profiling_steps,
+                **kwargs_call,
+            )
+
     elif sdxl:
         pipeline = GaudiStableDiffusionXLPipeline.from_pretrained(
             args.model_name_or_path,
