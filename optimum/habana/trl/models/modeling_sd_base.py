@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 import torch
+from diffusers import DDIMScheduler
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import rescale_noise_cfg
 from trl.models import DDPOPipelineOutput, DDPOSchedulerOutput, DefaultDDPOStableDiffusionPipeline
 from trl.models.modeling_sd_base import (
@@ -25,10 +26,7 @@ from trl.models.modeling_sd_base import (
 )
 
 from optimum.habana import GaudiConfig
-from optimum.habana.diffusers import (
-    GaudiDDIMScheduler,
-    GaudiStableDiffusionPipeline,
-)
+from optimum.habana.diffusers import GaudiStableDiffusionPipeline
 
 
 def scheduler_step(
@@ -327,7 +325,6 @@ class GaudiDefaultDDPOStableDiffusionPipeline(DefaultDDPOStableDiffusionPipeline
         """
         Adapted from: https://github.com/huggingface/trl/blob/v0.7.8/trl/models/modeling_sd_base.py#L531
         - use GaudiStableDiffusionPipeline instead of StableDiffusionPipeline
-        - use GaudiDDIMScheduler instead of DDIMScheduler
         - support bf16.
         """
         self.sd_pipeline = GaudiStableDiffusionPipeline.from_pretrained(
@@ -360,7 +357,7 @@ class GaudiDefaultDDPOStableDiffusionPipeline(DefaultDDPOStableDiffusionPipeline
                     "Otherwise please check the if `pytorch_lora_weights.safetensors` exists in the model folder."
                 )
 
-        self.sd_pipeline.scheduler = GaudiDDIMScheduler.from_config(self.sd_pipeline.scheduler.config)
+        self.sd_pipeline.scheduler = DDIMScheduler.from_config(self.sd_pipeline.scheduler.config)
         self.sd_pipeline.safety_checker = None
 
         # memory optimization

@@ -63,10 +63,6 @@ from transformers import AutoTokenizer, PretrainedConfig
 from optimum.habana import GaudiConfig
 from optimum.habana.accelerate import GaudiAccelerator
 from optimum.habana.accelerate.utils.dataclasses import GaudiDistributedType
-from optimum.habana.diffusers import (
-    GaudiEulerDiscreteScheduler,
-    GaudiStableDiffusionXLPipeline,
-)
 from optimum.habana.utils import HabanaProfile, set_seed, to_gb_rounded
 
 
@@ -1401,7 +1397,6 @@ def main(args):
                 if args.prediction_type is not None:
                     scheduler_args = {"prediction_type": args.prediction_type}
                     pipeline.scheduler = pipeline.scheduler.from_config(pipeline.scheduler.config, **scheduler_args)
-                pipeline.scheduler = GaudiEulerDiscreteScheduler.from_config(pipeline.scheduler.config)
                 pipeline = pipeline.to(accelerator.device)
                 pipeline.set_progress_bar_config(disable=True)
 

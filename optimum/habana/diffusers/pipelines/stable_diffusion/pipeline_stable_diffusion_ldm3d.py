@@ -34,6 +34,7 @@ from optimum.utils import logging
 from ....transformers.gaudi_configuration import GaudiConfig
 from ....utils import speed_metrics, warmup_inference_steps_time_adjustment
 from ..pipeline_utils import GaudiDiffusionPipeline
+from ..stable_diffusion.pipeline_stable_diffusion import retrieve_timesteps, reset_timesteps
 from .pipeline_stable_diffusion import GaudiStableDiffusionPipeline
 
 
@@ -295,9 +296,10 @@ class GaudiStableDiffusionLDM3DPipeline(GaudiDiffusionPipeline, StableDiffusionL
             )
 
             # 4. Prepare timesteps
-            self.scheduler.set_timesteps(num_inference_steps, device="cpu")
-            timesteps = self.scheduler.timesteps.to(device)
-            self.scheduler.reset_timestep_dependent_params()
+            #self.scheduler.set_timesteps(num_inference_steps, device="cpu")
+            #timesteps = self.scheduler.timesteps.to(device)
+            #self.scheduler.reset_timestep_dependent_params()
+            timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
 
             # 5. Prepare latent variables
             num_channels_latents = self.unet.config.in_channels
@@ -397,6 +399,9 @@ class GaudiStableDiffusionLDM3DPipeline(GaudiDiffusionPipeline, StableDiffusionL
                     if callback is not None and i % callback_steps == 0:
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, timestep, latents_batch)
+
+                # Reset scheduler for next batch
+                timesteps, _ = reset_timesteps(self.scheduler, num_inference_steps, device, timesteps)
 
                 if use_warmup_inference_steps:
                     t1 = warmup_inference_steps_time_adjustment(

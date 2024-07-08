@@ -52,11 +52,6 @@ GAUDI_LOADABLE_CLASSES = {
         "ProcessorMixin": ["save_pretrained", "from_pretrained"],
         "ImageProcessingMixin": ["save_pretrained", "from_pretrained"],
     },
-    "optimum.habana.diffusers.schedulers": {
-        "GaudiDDIMScheduler": ["save_pretrained", "from_pretrained"],
-        "GaudiEulerDiscreteScheduler": ["save_pretrained", "from_pretrained"],
-        "GaudiEulerAncestralDiscreteScheduler": ["save_pretrained", "from_pretrained"],
-    },
 }
 
 GAUDI_ALL_IMPORTABLE_CLASSES = {}
@@ -71,8 +66,6 @@ def _fetch_class_library_tuple(module):
     # register the config from the original module, not the dynamo compiled one
     not_compiled_module = _unwrap_model(module)
     library = not_compiled_module.__module__.split(".")[0]
-    if library == "optimum":
-        library = "optimum.habana.diffusers.schedulers"
 
     # check if the module is a pipeline module
     module_path_items = not_compiled_module.__module__.split(".")

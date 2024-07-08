@@ -41,6 +41,7 @@ from datasets import load_dataset
 from diffusers import (
     AutoencoderKL,
     ControlNetModel,
+    DDIMScheduler,
     UNet2DConditionModel,
     UniPCMultistepScheduler,
 )
@@ -55,7 +56,7 @@ from transformers import AutoTokenizer, PretrainedConfig
 
 from optimum.habana import GaudiConfig
 from optimum.habana.accelerate import GaudiAccelerator
-from optimum.habana.diffusers import GaudiDDIMScheduler, GaudiStableDiffusionControlNetPipeline
+from optimum.habana.diffusers import GaudiStableDiffusionControlNetPipeline
 from optimum.habana.utils import set_seed
 
 
@@ -799,7 +800,7 @@ def main(args):
     text_encoder_cls = import_model_class_from_model_name_or_path(args.pretrained_model_name_or_path, args.revision)
 
     # Load scheduler and models
-    noise_scheduler = GaudiDDIMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    noise_scheduler = DDIMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     text_encoder = text_encoder_cls.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
     )

@@ -37,6 +37,7 @@ from ..stable_diffusion.pipeline_stable_diffusion import (
     GaudiStableDiffusionPipeline,
     GaudiStableDiffusionPipelineOutput,
     retrieve_timesteps,
+    reset_timesteps,
 )
 
 
@@ -597,6 +598,9 @@ class GaudiStableDiffusionControlNetPipeline(GaudiDiffusionPipeline, StableDiffu
                             callback(step_idx, t, latents_batch)
 
                     hb_profiler.step()
+
+                # Reset scheduler for next batch
+                timesteps, _ = reset_timesteps(self.scheduler, num_inference_steps, device, timesteps)
 
                 if not output_type == "latent":
                     # 8. Post-processing

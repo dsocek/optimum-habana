@@ -22,20 +22,20 @@ Check out this [blog post](https://huggingface.co/blog/stable_diffusion) for mor
 
 ## How to generate images?
 
-To generate images with Stable Diffusion on Gaudi, you need to instantiate two instances:
+To generate images with Stable Diffusion on Gaudi, you need to instantiate the following instance:
 - A pipeline with [`GaudiStableDiffusionPipeline`](https://huggingface.co/docs/optimum/habana/package_reference/stable_diffusion_pipeline). This pipeline supports *text-to-image generation*.
-- A scheduler with [`GaudiDDIMScheduler`](https://huggingface.co/docs/optimum/habana/package_reference/stable_diffusion_pipeline#optimum.habana.diffusers.GaudiDDIMScheduler). This scheduler has been optimized for Gaudi.
 
 When initializing the pipeline, you have to specify `use_habana=True` to deploy it on HPUs.
 Furthermore, to get the fastest possible generations you should enable **HPU graphs** with `use_hpu_graphs=True`.
 Finally, you will need to specify a [Gaudi configuration](https://huggingface.co/docs/optimum/habana/package_reference/gaudi_config) which can be downloaded from the Hugging Face Hub.
 
 ```python
-from optimum.habana.diffusers import GaudiDDIMScheduler, GaudiStableDiffusionPipeline
+from diffusers import DDIMScheduler
+from optimum.habana.diffusers import GaudiStableDiffusionPipeline
 
 model_name = "runwayml/stable-diffusion-v1-5"
 
-scheduler = GaudiDDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
+scheduler = DDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
 
 pipeline = GaudiStableDiffusionPipeline.from_pretrained(
     model_name,
@@ -71,12 +71,12 @@ Check out the [example](https://github.com/huggingface/optimum-habana/tree/main/
 Here is an example:
 
 ```python
-from optimum.habana.diffusers import GaudiDDIMScheduler, GaudiStableDiffusionPipeline
-
+from diffusers import DDIMScheduler
+from optimum.habana.diffusers import GaudiStableDiffusionPipeline
 
 model_name = "stabilityai/stable-diffusion-2-1"
 
-scheduler = GaudiDDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
+scheduler = DDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
 
 pipeline = GaudiStableDiffusionPipeline.from_pretrained(
     model_name,
@@ -113,9 +113,8 @@ See [here](https://huggingface.co/docs/diffusers/api/pipelines/stable_diffusion/
 
 ### How to upscale low resolution images?
 
-To generate RGB and depth images with Stable Diffusion Upscale on Gaudi, you need to instantiate two instances:
+To generate RGB and depth images with Stable Diffusion Upscale on Gaudi, you need to instantiate the following instance:
 - A pipeline with [`GaudiStableDiffusionUpscalePipeline`](../package_reference/stable_diffusion_pipeline#optimum.habana.diffusers.GaudiStableDiffusionUpscalePipeline).
-- A scheduler with [`GaudiDDIMScheduler`](../package_reference/stable_diffusion_pipeline#optimum.habana.diffusers.GaudiDDIMScheduler). This scheduler has been optimized for Gaudi.
 
 When initializing the pipeline, you have to specify `use_habana=True` to deploy it on HPUs.
 Furthermore, to get the fastest possible generations you should enable **HPU graphs** with `use_hpu_graphs=True`.
@@ -124,17 +123,15 @@ Finally, you will need to specify a [Gaudi configuration](../package_reference/g
 ```python
 import requests
 from io import BytesIO
-from optimum.habana.diffusers import (
-    GaudiDDIMScheduler,
-    GaudiStableDiffusionUpscalePipeline,
-)
+from diffusers import DDIMScheduler
+from optimum.habana.diffusers import GaudiStableDiffusionUpscalePipeline
 from optimum.habana.utils import set_seed
 from PIL import Image
 
 set_seed(42)
 
 model_name_upscale = "stabilityai/stable-diffusion-x4-upscaler"
-scheduler = GaudiDDIMScheduler.from_pretrained(model_name_upscale, subfolder="scheduler")
+scheduler = DDIMScheduler.from_pretrained(model_name_upscale, subfolder="scheduler")
 url = "https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main/sd2-upscale/low_res_cat.png"
 response = requests.get(url)
 low_res_img = Image.open(BytesIO(response.content)).convert("RGB")

@@ -33,6 +33,9 @@ from diffusers import (
     AutoencoderKL,
     AutoencoderKLTemporalDecoder,
     ControlNetModel,
+    DDIMScheduler,
+    EulerAncestralDiscreteScheduler,
+    EulerDiscreteScheduler,
     UNet2DConditionModel,
     UNetSpatioTemporalConditionModel,
     UniPCMultistepScheduler,
@@ -57,10 +60,7 @@ from transformers.testing_utils import parse_flag_from_env, slow
 
 from optimum.habana import GaudiConfig
 from optimum.habana.diffusers import (
-    GaudiDDIMScheduler,
     GaudiDiffusionPipeline,
-    GaudiEulerAncestralDiscreteScheduler,
-    GaudiEulerDiscreteScheduler,
     GaudiStableDiffusionControlNetPipeline,
     GaudiStableDiffusionLDM3DPipeline,
     GaudiStableDiffusionPipeline,
@@ -172,7 +172,7 @@ class GaudiPipelineUtilsTester(TestCase):
 
     def test_save_pretrained(self):
         model_name = "hf-internal-testing/tiny-stable-diffusion-torch"
-        scheduler = GaudiDDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
+        scheduler = DDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
         pipeline = GaudiStableDiffusionPipeline.from_pretrained(
             model_name,
             scheduler=scheduler,
@@ -204,7 +204,7 @@ class GaudiStableDiffusionPipelineTester(TestCase):
             cross_attention_dim=32,
             norm_num_groups=2,
         )
-        scheduler = GaudiDDIMScheduler(
+        scheduler = DDIMScheduler(
             beta_start=0.00085,
             beta_end=0.012,
             beta_schedule="scaled_linear",
@@ -284,7 +284,7 @@ class GaudiStableDiffusionPipelineTester(TestCase):
 
     def test_stable_diffusion_no_safety_checker(self):
         gaudi_config = GaudiConfig()
-        scheduler = GaudiDDIMScheduler(
+        scheduler = DDIMScheduler(
             beta_start=0.00085,
             beta_end=0.012,
             beta_schedule="scaled_linear",
@@ -299,7 +299,7 @@ class GaudiStableDiffusionPipelineTester(TestCase):
             gaudi_config=gaudi_config,
         )
         self.assertIsInstance(pipe, GaudiStableDiffusionPipeline)
-        self.assertIsInstance(pipe.scheduler, GaudiDDIMScheduler)
+        self.assertIsInstance(pipe.scheduler, DDIMScheduler)
         self.assertIsNone(pipe.safety_checker)
 
         image = pipe("example prompt", num_inference_steps=2).images[0]
@@ -579,7 +579,7 @@ class GaudiStableDiffusionPipelineTester(TestCase):
         num_images_per_prompt = 11
         batch_size = 4
         model_name = "runwayml/stable-diffusion-v1-5"
-        scheduler = GaudiDDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
+        scheduler = DDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
 
         pipeline = GaudiStableDiffusionPipeline.from_pretrained(
             model_name,
@@ -608,7 +608,7 @@ class GaudiStableDiffusionPipelineTester(TestCase):
         num_images_per_prompt = 11
         batch_size = 4
         model_name = "stabilityai/stable-diffusion-2-1"
-        scheduler = GaudiDDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
+        scheduler = DDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
 
         pipeline = GaudiStableDiffusionPipeline.from_pretrained(
             model_name,
@@ -634,7 +634,7 @@ class GaudiStableDiffusionPipelineTester(TestCase):
         set_seed(seed)
         model_name = "CompVis/stable-diffusion-v1-4"
         # fp32
-        scheduler = GaudiDDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
+        scheduler = DDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
         pipeline = GaudiStableDiffusionPipeline.from_pretrained(
             model_name,
             scheduler=scheduler,
@@ -672,7 +672,7 @@ class GaudiStableDiffusionPipelineTester(TestCase):
         set_seed(seed)
         model_name = "Intel/ldm3d-4c"
         # fp32
-        scheduler = GaudiDDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
+        scheduler = DDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
         pipeline = GaudiStableDiffusionLDM3DPipeline.from_pretrained(
             model_name,
             scheduler=scheduler,
@@ -708,7 +708,7 @@ class GaudiStableDiffusionPipelineTester(TestCase):
     def test_no_generation_regression_upscale(self):
         model_name = "stabilityai/stable-diffusion-x4-upscaler"
         # fp32
-        scheduler = GaudiDDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
+        scheduler = DDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
         pipeline = GaudiStableDiffusionUpscalePipeline.from_pretrained(
             model_name,
             scheduler=scheduler,
@@ -857,7 +857,7 @@ class GaudiStableDiffusionXLPipelineTester(TestCase):
             cross_attention_dim=64,
             norm_num_groups=1,
         )
-        scheduler = GaudiEulerDiscreteScheduler(
+        scheduler = EulerDiscreteScheduler(
             beta_start=0.00085,
             beta_end=0.012,
             steps_offset=1,
@@ -943,7 +943,7 @@ class GaudiStableDiffusionXLPipelineTester(TestCase):
         components = self.get_dummy_components()
         gaudi_config = GaudiConfig(use_torch_autocast=False)
         sd_pipe = GaudiStableDiffusionXLPipeline(use_habana=True, gaudi_config=gaudi_config, **components)
-        sd_pipe.scheduler = GaudiEulerAncestralDiscreteScheduler.from_config(sd_pipe.scheduler.config)
+        sd_pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(sd_pipe.scheduler.config)
         sd_pipe.set_progress_bar_config(disable=None)
 
         inputs = self.get_dummy_inputs(device)
@@ -961,7 +961,7 @@ class GaudiStableDiffusionXLPipelineTester(TestCase):
         gaudi_config = GaudiConfig(use_torch_autocast=False)
 
         sd_pipe = GaudiStableDiffusionXLPipeline(use_habana=True, gaudi_config=gaudi_config, **components)
-        sd_pipe.scheduler = GaudiEulerAncestralDiscreteScheduler.from_config(sd_pipe.scheduler.config)
+        sd_pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(sd_pipe.scheduler.config)
 
         sd_pipe.set_progress_bar_config(disable=None)
 
@@ -1216,7 +1216,7 @@ class GaudiStableDiffusionControlNetPipelineTester(TestCase):
         )
         controlnet.controlnet_down_blocks.apply(init_weights)
 
-        scheduler = GaudiDDIMScheduler(
+        scheduler = DDIMScheduler(
             beta_start=0.00085,
             beta_end=0.012,
             beta_schedule="scaled_linear",
@@ -1491,7 +1491,7 @@ class GaudiStableDiffusionMultiControlNetPipelineTester(TestCase):
         )
         controlnet2.controlnet_down_blocks.apply(init_weights)
 
-        scheduler = GaudiDDIMScheduler(
+        scheduler = DDIMScheduler(
             beta_start=0.00085,
             beta_end=0.012,
             beta_schedule="scaled_linear",
@@ -2089,7 +2089,7 @@ class GaudiStableVideoDiffusionPipelineTester(TestCase):
             projection_class_embeddings_input_dim=96,
             addition_time_embed_dim=32,
         )
-        scheduler = GaudiEulerDiscreteScheduler(
+        scheduler = EulerDiscreteScheduler(
             beta_start=0.00085,
             beta_end=0.012,
             beta_schedule="scaled_linear",
@@ -2188,7 +2188,7 @@ class GaudiStableVideoDiffusionPipelineTester(TestCase):
             "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/svd/rocket.png"
         )
         model_name = "stabilityai/stable-video-diffusion-img2vid-xt"
-        scheduler = GaudiEulerDiscreteScheduler.from_pretrained(model_name, subfolder="scheduler")
+        scheduler = EulerDiscreteScheduler.from_pretrained(model_name, subfolder="scheduler")
 
         pipeline = GaudiStableVideoDiffusionPipeline.from_pretrained(
             model_name,

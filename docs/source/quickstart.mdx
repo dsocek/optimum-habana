@@ -59,13 +59,11 @@ Thus, you can easily deploy Stable Diffusion on Gaudi for performing text-to-ima
 Here is how to use it and the differences with the 🤗 Diffusers library:
 ```diff
 - from diffusers import DDIMScheduler, StableDiffusionPipeline
-+ from optimum.habana.diffusers import GaudiDDIMScheduler, GaudiStableDiffusionPipeline
++ from diffusers import DDIMScheduler
++ from optimum.habana.diffusers import GaudiStableDiffusionPipeline
 
 
 model_name = "runwayml/stable-diffusion-v1-5"
-
-- scheduler = DDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
-+ scheduler = GaudiDDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
 
 - pipeline = StableDiffusionPipeline.from_pretrained(
 + pipeline = GaudiStableDiffusionPipeline.from_pretrained(

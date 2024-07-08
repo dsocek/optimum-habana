@@ -25,21 +25,21 @@ The abstract from the paper is:
 
 ## How to generate RGB and depth images?
 
-To generate RGB and depth images with Stable Diffusion LDM3D on Gaudi, you need to instantiate two instances:
+To generate RGB and depth images with Stable Diffusion LDM3D on Gaudi, you need to instantiate the following instance:
 - A pipeline with [`GaudiStableDiffusionLDM3DPipeline`]. This pipeline supports *text-to-(rgb, depth) generation*.
-- A scheduler with [`GaudiDDIMScheduler`](https://huggingface.co/docs/optimum/habana/package_reference/stable_diffusion_pipeline#optimum.habana.diffusers.GaudiDDIMScheduler). This scheduler has been optimized for Gaudi.
 
 When initializing the pipeline, you have to specify `use_habana=True` to deploy it on HPUs.
 Furthermore, to get the fastest possible generations you should enable **HPU graphs** with `use_hpu_graphs=True`.
 Finally, you will need to specify a [Gaudi configuration](https://huggingface.co/docs/optimum/habana/package_reference/gaudi_config) which can be downloaded from the Hugging Face Hub.
 
 ```python
-from optimum.habana.diffusers import GaudiDDIMScheduler, GaudiStableDiffusionLDM3DPipeline
+from diffusers import DDIMScheduler
+from optimum.habana.diffusers import GaudiStableDiffusionLDM3DPipeline
 from optimum.habana.utils import set_seed
 
 model_name = "Intel/ldm3d-4c"
 
-scheduler = GaudiDDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
+scheduler = DDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
 
 set_seed(42)
 

@@ -36,6 +36,7 @@ from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration
 from diffusers import (
     AutoencoderKL,
+    DDIMScheduler,
     UNet2DConditionModel,
 )
 from diffusers.optimization import get_scheduler
@@ -52,7 +53,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 
 from optimum.habana import GaudiConfig
 from optimum.habana.accelerate import GaudiAccelerator
-from optimum.habana.diffusers import GaudiDDIMScheduler, GaudiStableDiffusionPipeline
+from optimum.habana.diffusers import GaudiStableDiffusionPipeline
 from optimum.habana.utils import set_seed
 
 
@@ -131,7 +132,7 @@ def log_validation(text_encoder, tokenizer, unet, vae, args, accelerator, weight
         use_hpu_graphs=True,
         gaudi_config=args.gaudi_config_name,
     )
-    pipeline.scheduler = GaudiDDIMScheduler.from_config(pipeline.scheduler.config)
+    pipeline.scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
     pipeline.set_progress_bar_config(disable=True)
 
     # run inference
@@ -633,7 +634,7 @@ def main():
         tokenizer = CLIPTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer")
 
     # Load scheduler and models
-    noise_scheduler = GaudiDDIMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    noise_scheduler = DDIMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     text_encoder = CLIPTextModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
     ).to(accelerator.device)

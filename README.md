@@ -134,17 +134,15 @@ where `gaudi_config_name` is the name of a model from the [Hub](https://huggingf
 
 #### Diffusers Interface
 
-You can generate images from prompts using Stable Diffusion on Intel Gaudi using the [`GaudiStableDiffusionPipeline`](https://huggingface.co/docs/optimum/habana/package_reference/stable_diffusion_pipeline) class and the [`GaudiDDIMScheduler`] which have been both optimized for HPUs. Here is how to use them and the differences with the Diffusers library:
+You can generate images from prompts using Stable Diffusion on Intel Gaudi using the [`GaudiStableDiffusionPipeline`](https://huggingface.co/docs/optimum/habana/package_reference/stable_diffusion_pipeline) class which have been optimized for HPUs. Here is how to use it and the differences with the Diffusers library:
 
 ```diff
 - from diffusers import DDIMScheduler, StableDiffusionPipeline
-+ from optimum.habana.diffusers import GaudiDDIMScheduler, GaudiStableDiffusionPipeline
++ from diffusers import DDIMScheduler
++ from optimum.habana.diffusers import GaudiStableDiffusionPipeline
 
 
 model_name = "runwayml/stable-diffusion-v1-5"
-
-- scheduler = DDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
-+ scheduler = GaudiDDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
 
 - pipeline = StableDiffusionPipeline.from_pretrained(
 + pipeline = GaudiStableDiffusionPipeline.from_pretrained(

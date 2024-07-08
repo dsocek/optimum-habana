@@ -19,9 +19,9 @@ import sys
 from pathlib import Path
 
 import torch
+from diffusers import EulerDiscreteScheduler
 from diffusers.utils import export_to_video, load_image
 
-from optimum.habana.diffusers import GaudiEulerDiscreteScheduler
 from optimum.habana.utils import set_seed
 
 
@@ -178,7 +178,7 @@ def main():
     logger.setLevel(logging.INFO)
 
     # Initialize the scheduler and the generation pipeline
-    scheduler = GaudiEulerDiscreteScheduler.from_pretrained(args.model_name_or_path, subfolder="scheduler")
+    scheduler = EulerDiscreteScheduler.from_pretrained(args.model_name_or_path, subfolder="scheduler")
     kwargs = {
         "scheduler": scheduler,
         "use_habana": args.use_habana,

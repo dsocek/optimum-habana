@@ -36,6 +36,7 @@ from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 from ....transformers.gaudi_configuration import GaudiConfig
 from ....utils import speed_metrics
 from ..pipeline_utils import GaudiDiffusionPipeline
+from ..stable_diffusion.pipeline_stable_diffusion import retrieve_timesteps, reset_timesteps
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -605,9 +606,7 @@ class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline, StableVideoDiffu
             added_time_ids = added_time_ids.to(device)
 
             # 6 Prepare timesteps
-            self.scheduler.set_timesteps(num_inference_steps, device=device)
-            timesteps = self.scheduler.timesteps
-            self.scheduler.reset_timestep_dependent_params()
+            timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
 
             # 7 Prepare latent variables
             num_channels_latents = self.unet.config.in_channels
@@ -709,6 +708,9 @@ class GaudiStableVideoDiffusionPipeline(GaudiDiffusionPipeline, StableVideoDiffu
                         callback_outputs = callback_on_step_end(self, i, timestep, callback_kwargs)
 
                         latents_batch = callback_outputs.pop("latents", latents_batch)
+
+                # Reset scheduler for next batch
+                timesteps, _ = reset_timesteps(self.scheduler, num_inference_steps, device, timesteps)
 
                 if not output_type == "latent":
                     # cast back to fp16/bf16 if needed
