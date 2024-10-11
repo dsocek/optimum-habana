@@ -78,13 +78,30 @@ EXAMPLE_DOC_STRING = """
 #modified to support FusedSDPA 
 import torch.nn.functional as F
 from diffusers.models.attention_processor import Attention
+import copy
 
 def apply_rope(xq, xk, freqs_cis):
-    xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
-    xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)
-    xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]
-    xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
-    return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)
+    xq0 = copy.deepcopy(xq.float())
+    xq0[..., 1::2] = xq[..., 0::2]
+    xq1 = copy.deepcopy(xq.float())
+    xq1[..., 0::2] = xq[..., 1::2]
+
+    xk0 = copy.deepcopy(xk.float())
+    xk0[..., 1::2] = xk[..., 0::2]
+    xk1 = copy.deepcopy(xk.float())
+    xk1[..., 0::2] = xk[..., 1::2]
+
+    cis0 = freqs_cis[...,0::2] 
+    cis1 = freqs_cis[...,1::2] 
+
+    sh = cis0.shape
+    cis0 = cis0.reshape(*sh[:-3], sh[-3] * sh[-2] * sh[-1]) 
+    cis1 = cis1.reshape(*sh[:-3], sh[-3] * sh[-2] * sh[-1])
+
+    xq_out = (xq0 * cis0 + xq1 * cis1).type_as(xq)
+    xk_out = (xk0 * cis0 + xk1 * cis1).type_as(xk)
+
+    return xq_out, xk_out
 
 class GaudiFluxSingleAttnProcessor2_0:
     r"""
