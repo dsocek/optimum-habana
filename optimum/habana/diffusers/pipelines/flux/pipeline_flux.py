@@ -76,32 +76,96 @@ EXAMPLE_DOC_STRING = """
 #GaudiFluxSingleAttnProcessor2_0 and GaudiFluxAttnProcessor2_0 are based on FluxSingleAttnProcessor2_0 and FluxAttnProcessor2_0
 #from //github.com/huggingface/diffusers/blob/v0.30.3/src/diffusers/models/attention_processor.py and have been
 #modified to support FusedSDPA 
+import os
 import torch.nn.functional as F
 from diffusers.models.attention_processor import Attention
-import copy
+from habana_frameworks.torch.hpex.kernels import apply_rotary_pos_emb as FusedRoPE
 
-def apply_rope(xq, xk, freqs_cis):
-    xq0 = copy.deepcopy(xq.float())
-    xq0[..., 1::2] = xq[..., 0::2]
-    xq1 = copy.deepcopy(xq.float())
-    xq1[..., 0::2] = xq[..., 1::2]
+def apply_rope_org(xq, xk, freqs_cis):
+    xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
+    xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)
+    xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]
+    xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
+    return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)
 
-    xk0 = copy.deepcopy(xk.float())
-    xk0[..., 1::2] = xk[..., 0::2]
-    xk1 = copy.deepcopy(xk.float())
-    xk1[..., 0::2] = xk[..., 1::2]
 
-    cis0 = freqs_cis[...,0::2] 
-    cis1 = freqs_cis[...,1::2] 
+def apply_rope_fused(xq, xk, freqs_cis):
 
-    sh = cis0.shape
-    cis0 = cis0.reshape(*sh[:-3], sh[-3] * sh[-2] * sh[-1]) 
-    cis1 = cis1.reshape(*sh[:-3], sh[-3] * sh[-2] * sh[-1])
+    cos = freqs_cis[...,0,0].type_as(xq)
+    sin = freqs_cis[...,1,0].type_as(xq)
+    cos_ = torch.cat((cos, cos), dim=-1)
+    sin_ = torch.cat((sin, sin), dim=-1)
 
-    xq_out = (xq0 * cis0 + xq1 * cis1).type_as(xq)
-    xk_out = (xk0 * cis0 + xk1 * cis1).type_as(xk)
+    xq0 = xq[..., 0::2]
+    xq1 = xq[..., 1::2]
+    xq_ = torch.cat((xq0, xq1), dim=-1)
+
+    xk0 = xk[..., 0::2]
+    xk1 = xk[..., 1::2]
+    xk_ = torch.cat((xk0, xk1), dim=-1)
+
+    xq_out_ = FusedRoPE(xq_, cos_, sin_)
+    xk_out_ = FusedRoPE(xk_, cos_, sin_)
+
+    sh = xq_out_.shape
+    xq_out = xq_out_.view(*sh[:-1], 2, sh[-1]//2)
+    dims = list(range(xq_out.ndimension()))
+    dims[-1], dims[-2] = dims[-2], dims[-1]
+    xq_out = xq_out.permute(*dims).contiguous().view(sh)
+
+    sh = xk_out_.shape
+    xk_out = xk_out_.view(*sh[:-1], 2, sh[-1]//2)
+    dims = list(range(xk_out.ndimension()))
+    dims[-1], dims[-2] = dims[-2], dims[-1]
+    xk_out = xk_out.permute(*dims).contiguous().view(sh)
 
     return xq_out, xk_out
+
+
+freqs_cos = None
+freqs_sin = None
+def apply_rope_opt(xq, xk, freqs_cis):
+    global freqs_cos, freqs_sin
+    if freqs_cos == None :
+        cos_ = freqs_cis[...,0,0].type_as(xq)
+        sin_ = freqs_cis[...,1,0].type_as(xq)
+
+        freqs_cos_ = torch.stack((cos_, cos_), dim=-1)
+        freqs_sin_ = torch.stack((sin_, -sin_), dim=-1)
+
+        sh = freqs_sin_.shape
+        freqs_cos = freqs_cos_.reshape(*sh[:-2], sh[-2] * sh[-1])
+        freqs_sin = freqs_sin_.reshape(*sh[:-2], sh[-2] * sh[-1])
+    
+
+    xq_cos = xq * freqs_cos
+    xq_sin = xq * freqs_sin
+
+    xk_cos = xk * freqs_cos
+    xk_sin = xk * freqs_sin
+
+    xq_sin0 = xq_sin[..., 0::2]
+    xq_sin1 = xq_sin[..., 1::2]
+    xq_sin_per = torch.stack((xq_sin1, xq_sin0), dim=-1).reshape(xq_sin.shape)
+
+    xk_sin0 = xk_sin[..., 0::2]
+    xk_sin1 = xk_sin[..., 1::2]
+    xk_sin_per = torch.stack((xk_sin1, xk_sin0), dim=-1).reshape(xk_sin.shape)
+
+    xq_out_new = xq_cos + xq_sin_per
+    xk_out_new = xk_cos + xk_sin_per
+
+    return xq_out_new, xk_out_new
+
+def apply_rope(xq, xk, freqs_cis) :
+    rope_opt = os.getenv("FLUX_ROPE_OPT")
+    if rope_opt == "fused" or rope_opt == None :
+        return apply_rope_fused(xq, xk, freqs_cis)
+    elif rope_opt == "original" :
+        return apply_rope_org(xq, xk, freqs_cis)
+    else:
+        return apply_rope_opt(xq, xk, freqs_cis)
+
 
 class GaudiFluxSingleAttnProcessor2_0:
     r"""
