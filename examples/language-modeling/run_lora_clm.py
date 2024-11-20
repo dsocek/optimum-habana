@@ -22,6 +22,7 @@ import logging
 import math
 import os
 import sys
+import debugpy
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -518,6 +519,7 @@ def main():
     if model_args.config_name:
         config = AutoConfig.from_pretrained(model_args.config_name, **config_kwargs)
     elif model_args.model_name_or_path:
+        debugpy.breakpoint()
         config = AutoConfig.from_pretrained(model_args.model_name_or_path, **config_kwargs)
     else:
         raise ValueError("Please provide value for model_name_or_path or config_name.")

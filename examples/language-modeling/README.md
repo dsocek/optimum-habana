@@ -16,11 +16,16 @@ limitations under the License.
 
 # Language Model Training
 
-Fine-tuning (or training from scratch) the library models for language modeling on a text dataset.
-GPT-2 is trained or fine-tuned using a causal language modeling (CLM) loss while ALBERT, BERT, DistilBERT and RoBERTa are trained or fine-tuned using a masked language modeling (MLM) loss. You can find more information about the differences between those objectives in our [model summary](https://huggingface.co/transformers/model_summary.html).
+The examples in this section illustrate how to fine-tune or train language models using text datasets,
+depending on the model and training objective.
+- GPT-2 uses a causal language modeling (CLM) loss for training or fine-tuning.
+- ALBERT, BERT, DistilBERT, and RoBERTa use a masked language modeling (MLM) loss.
+
+For more details on these objectives and their differences, check out our
+[model summary](https://huggingface.co/transformers/model_summary.html)
 
 The following examples will run on datasets hosted on our [hub](https://huggingface.co/datasets) or with your own
-text files for training and validation. We give examples of both below.
+text files for training and validation.
 
 ## Requirements
 
@@ -31,7 +36,9 @@ pip install -r requirements.txt
 
 ## GPT2/GPT-J/GPT-NeoX and causal language modeling
 
-The following examples fine-tune GPT-2, GPT-J-6B and GPT-NeoX-20B on WikiText-2. We're using the raw WikiText-2 (no tokens were replaced before the tokenization). The loss here is the one of causal language modeling.
+The following examples fine-tune GPT-2, GPT-J-6B and GPT-NeoX-20B on WikiText-2.
+We are using the raw WikiText-2 (no tokens were replaced before the tokenization).
+The loss here is CLM (causal language modeling).
 
 
 ### Single-card Training (GPT2)

@@ -36,11 +36,13 @@ from transformers.models.mllama.modeling_mllama import (
     MllamaTextModel,
     MllamaTextSelfAttention,
     MllamaVisionModel,
-    _prepare_4d_causal_attention_mask_with_cache_position,
     _prepare_aspect_ratio_attention_mask,
     apply_rotary_pos_emb,
     repeat_kv,
 )
+
+#import transformers.models.llama.modeling_llama.LlamaModel._prepare_4d_causal_attention_mask_with_cache_position as _prepare_4d_causal_attention_mask_with_cache_position
+
 from transformers.utils import (
     logging,
 )
@@ -661,7 +663,7 @@ class GaudiMllamaTextModel(MllamaTextModel):
         )
 
         # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
-        causal_mask = _prepare_4d_causal_attention_mask_with_cache_position(
+        causal_mask = MllamaTextModel._prepare_4d_causal_attention_mask_with_cache_position(
             attention_mask,
             sequence_length=sequence_length,
             target_length=target_length,

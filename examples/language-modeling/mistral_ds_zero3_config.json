@@ -6,9 +6,9 @@
     "bf16": {
         "enabled": true
     },
-    "gradient_clipping": 1.0,
+    "gradient_clipping": "auto",
     "zero_optimization": {
-        "stage": 3,
+        "stage": "auto",
         "overlap_comm": false,
         "contiguous_gradients": false,
         "stage3_gather_16bit_weights_on_model_save": true
