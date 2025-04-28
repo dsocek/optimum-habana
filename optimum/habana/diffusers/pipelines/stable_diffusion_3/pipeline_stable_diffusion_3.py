@@ -88,9 +88,10 @@ class GaudiJointAttnProcessor2_0:
         - applied Fused SDPA from Habana's framework.
     """
 
-    def __init__(self):
+    def __init__(self, is_training=False):
         if not hasattr(F, "scaled_dot_product_attention"):
             raise ImportError("AttnProcessor2_0 requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0.")
+        self.is_training = is_training
 
     def __call__(
         self,
@@ -149,7 +150,9 @@ class GaudiJointAttnProcessor2_0:
 
         from habana_frameworks.torch.hpex.kernels import FusedSDPA
 
-        hidden_states = FusedSDPA.apply(query, key, value, None, 0.0, False, None, "fast", None)
+        # Fast FSDPA is not supported in training mode
+        fsdpa_mode = "None" if self.is_training else "fast"
+        hidden_states = FusedSDPA.apply(query, key, value, None, 0.0, False, None, fsdpa_mode, None)
 
         # hidden_states = F.scaled_dot_product_attention(query, key, value, dropout_p=0.0, is_causal=False)
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
@@ -655,7 +658,7 @@ class GaudiStableDiffusion3Pipeline(GaudiDiffusionPipeline, StableDiffusion3Pipe
             }
 
             for block in self.transformer.transformer_blocks:
-                block.attn.processor = GaudiJointAttnProcessor2_0()
+                block.attn.processor = GaudiJointAttnProcessor2_0(kwargs.get("is_training", False))
             ht.hpu.synchronize()
 
             t0 = time.time()

@@ -365,7 +365,7 @@ python ../text_to_image_generation.py \
 
 We can use the same `dog` dataset for the following examples.
 
-To launch FLUX.1-dev LoRA training on a single Gaudi card, use:"
+To launch FLUX.1-dev LoRA training on a single Gaudi card, use:
 ```bash
 python train_dreambooth_lora_flux.py \
     --pretrained_model_name_or_path="black-forest-labs/FLUX.1-dev" \
@@ -392,11 +392,87 @@ python train_dreambooth_lora_flux.py \
     --gaudi_config_name="Habana/stable-diffusion"
 ```
 
+You can run inference on multiple HPUs by replacing `python train_dreambooth_lora_flux.py`
+with `python ../../gaudi_spawn.py --world_size <num-HPUs> train_dreambooth_lora_flux.py`.
+
 > [!NOTE]
-> To use DeepSpeed instead of MPI, replace `--use_mpi` with `--use_deepspeed` in the previous example
+> To use MPI for multi-card training, add `--use_mpi` after `--world_size <num-HPUs>`.
+> To use DeepSpeed instead of MPI, replace `--use_mpi` with `--use_deepspeed`.
+
+
+After training completes, you could directly use `text_to_image_generation.py` sample for inference as follows:
+```bash
+python ../text_to_image_generation.py \
+    --model_name_or_path "black-forest-labs/FLUX.1-dev" \
+    --lora_id dog_lora_flux \
+    --prompts "A picture of a sks dog in a bucket" \
+    --num_images_per_prompt 5 \
+    --batch_size 1 \
+    --image_save_dir /tmp/flux_images \
+    --use_habana \
+    --use_hpu_graphs \
+    --gaudi_config Habana/stable-diffusion \
+    --sdp_on_bf16 \
+    --bf16
+```
+
+### DreamBooth LoRA Fine-Tuning with SD3 (Stable Diffusion 3 and 3.5)
+
+We can use the same `dog` dataset for the following examples.
+
+To launch SD3 LoRA training on a single Gaudi card, use:
+```bash
+python train_dreambooth_lora_sd3.py \
+    --pretrained_model_name_or_path="stabilityai/stable-diffusion-3-medium-diffusers" \
+    --dataset_name="dog" \
+    --instance_prompt="a photo of sks dog" \
+    --validation_prompt="a photo of sks dog in a bucket" \
+    --output_dir="dog_lora_sd3" \
+    --mixed_precision="bf16" \
+    --resolution=1024 \
+    --train_batch_size=1 \
+    --learning_rate=1e-4 \
+    --max_grad_norm=1 \
+    --report_to="tensorboard" \
+    --lr_scheduler="constant" \
+    --lr_warmup_steps=0 \
+    --max_train_steps=500 \
+    --seed="0" \
+    --use_hpu_graphs_for_inference \
+    --use_hpu_graphs_for_training \
+    --gaudi_config_name="Habana/stable-diffusion" \
+    --bf16
+```
+
+stable-diffusion/training/train_text_to_image_sd3.py \
+  --pretrained_model_name_or_path stabilityai/stable-diffusion-3-medium-diffusers \
+  --dataset_name lambdalabs/naruto-blip-captions \
+  --instance_prompt="a cute naruto creature" \
+  --resolution 512 \
+  --center_crop \
+  --random_flip \
+  --train_batch_size 4 \
+  --max_train_steps 100 \
+  --learning_rate 1e-05 \
+  --lr_scheduler constant \
+  --lr_warmup_steps 0 \
+  --output_dir sd3_model_output \
+  --gaudi_config_name Habana/stable-diffusion \
+  --dataloader_num_workers 8 \
+  --bf16 \
+  --use_hpu_graphs_for_training \
+  --use_hpu_graphs_for_inference \
+  --validation_prompt="a cute naruto creature" \
+  --validation_epochs 48 \
+  --checkpointing_steps 2500
+
 
 You can run inference on multiple HPUs by replacing `python train_dreambooth_lora_flux.py`
 with `python ../../gaudi_spawn.py --world_size <num-HPUs> train_dreambooth_lora_flux.py`.
+
+> [!NOTE]
+> To use MPI for multi-card training, add `--use_mpi` after `--world_size <num-HPUs>`.
+> To use DeepSpeed instead of MPI, replace `--use_mpi` with `--use_deepspeed`.
 
 After training completes, you could directly use `text_to_image_generation.py` sample for inference as follows:
 ```bash

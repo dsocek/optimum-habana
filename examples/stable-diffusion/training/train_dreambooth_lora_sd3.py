@@ -48,6 +48,7 @@ from transformers import CLIPTextModelWithProjection, CLIPTokenizer, PretrainedC
 from optimum.habana import GaudiConfig
 from optimum.habana.accelerate import GaudiAccelerator
 from optimum.habana.diffusers import GaudiStableDiffusion3Pipeline
+from optimum.habana.diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import GaudiJointAttnProcessor2_0
 from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
 from optimum.habana.utils import HabanaProfile, set_seed, to_gb_rounded
 
@@ -172,11 +173,11 @@ def log_validation(
 
     # run inference
     generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
-    # autocast_ctx = torch.autocast(accelerator.device.type) if not is_final_validation else nullcontext()
-    autocast_ctx = nullcontext()
+    autocast_ctx = torch.autocast(accelerator.device.type) if not is_final_validation else nullcontext()
+    is_training = not is_final_validation
 
     with autocast_ctx:
-        images = [pipeline(**pipeline_args, generator=generator).images[0] for _ in range(args.num_validation_images)]
+        images = [pipeline(**pipeline_args, generator=generator, is_training=is_training).images[0] for _ in range(args.num_validation_images)]
 
     for tracker in accelerator.trackers:
         phase_name = "test" if is_final_validation else "validation"
@@ -193,8 +194,6 @@ def log_validation(
             )
 
     del pipeline
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
     return images
 
@@ -484,13 +483,7 @@ def parse_args(input_args=None):
         "--optimizer",
         type=str,
         default="AdamW",
-        help=('The optimizer type to use. Choose between ["AdamW", "prodigy"]'),
-    )
-
-    parser.add_argument(
-        "--use_8bit_adam",
-        action="store_true",
-        help="Whether or not to use 8-bit Adam from bitsandbytes. Ignored if optimizer is not set to AdamW",
+        help=('The optimizer type to use. Choose between ["AdamW"]'),
     )
 
     parser.add_argument(
@@ -1007,7 +1000,7 @@ def main(args):
     gaudi_config.use_torch_autocast = gaudi_config.use_torch_autocast or args.bf16
     accelerator = GaudiAccelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        mixed_precision="bf16" if gaudi_config.use_torch_autocast else "no",
+        mixed_precision=args.mixed_precision,
         log_with=args.report_to,
         project_config=accelerator_project_config,
         force_autocast=gaudi_config.use_torch_autocast,
@@ -1086,8 +1079,6 @@ def main(args):
                     image.save(image_filename)
 
             del pipeline
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
 
     # Handle the repository creation
     if accelerator.is_main_process:
@@ -1163,9 +1154,7 @@ def main(args):
     if gaudi_config.use_torch_autocast or accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    # Keep VAE to hp for quality?
-    #vae.to(accelerator.device, dtype=torch.float32)
-    vae.to(accelerator.device, dtype=weight_type)
+    vae.to(accelerator.device, dtype=torch.float32)
     if not args.train_text_encoder:
         text_encoder_one.to(accelerator.device, dtype=weight_dtype)
         text_encoder_two.to(accelerator.device, dtype=weight_dtype)
@@ -1280,29 +1269,11 @@ def main(args):
         params_to_optimize = [transformer_parameters_with_lr]
 
     # Optimizer creation
-    if not (args.optimizer.lower() == "prodigy" or args.optimizer.lower() == "adamw"):
-        logger.warning(
-            f"Unsupported choice of optimizer: {args.optimizer}.Supported optimizers include [adamW, prodigy]."
-            "Defaulting to adamW"
-        )
-        args.optimizer = "adamw"
-
-    if args.use_8bit_adam and not args.optimizer.lower() == "adamw":
-        logger.warning(
-            f"use_8bit_adam is ignored when optimizer is not set to 'AdamW'. Optimizer was "
-            f"set to {args.optimizer.lower()}"
-        )
-
     if args.optimizer.lower() == "adamw":
-        if args.use_8bit_adam:
-            try:
-                import bitsandbytes as bnb
-            except ImportError:
-                raise ImportError(
-                    "To use 8-bit Adam, please install the bitsandbytes library: `pip install bitsandbytes`."
-                )
+        if gaudi_config.use_fused_adam:
+            from habana_frameworks.torch.hpex.optimizers import FusedAdamW
 
-            optimizer_class = bnb.optim.AdamW8bit
+            optimizer_class = FusedAdamW
         else:
             optimizer_class = torch.optim.AdamW
 
@@ -1312,42 +1283,8 @@ def main(args):
             weight_decay=args.adam_weight_decay,
             eps=args.adam_epsilon,
         )
-
-    if args.optimizer.lower() == "prodigy":
-        try:
-            import prodigyopt
-        except ImportError:
-            raise ImportError("To use Prodigy, please install the prodigyopt library: `pip install prodigyopt`")
-
-        optimizer_class = prodigyopt.Prodigy
-
-        if args.learning_rate <= 0.1:
-            logger.warning(
-                "Learning rate is too low. When using prodigy, it's generally better to set learning rate around 1.0"
-            )
-        if args.train_text_encoder and args.text_encoder_lr:
-            logger.warning(
-                f"Learning rates were provided both for the transformer and the text encoder- e.g. text_encoder_lr:"
-                f" {args.text_encoder_lr} and learning_rate: {args.learning_rate}. "
-                f"When using prodigy only learning_rate is used as the initial learning rate."
-            )
-            # changes the learning rate of text_encoder_parameters_one and text_encoder_parameters_two to be
-            # --learning_rate
-            params_to_optimize[1]["lr"] = args.learning_rate
-            params_to_optimize[2]["lr"] = args.learning_rate
-            params_to_optimize[3]["lr"] = args.learning_rate
-
-        optimizer = optimizer_class(
-            params_to_optimize,
-            lr=args.learning_rate,
-            betas=(args.adam_beta1, args.adam_beta2),
-            beta3=args.prodigy_beta3,
-            weight_decay=args.adam_weight_decay,
-            eps=args.adam_epsilon,
-            decouple=args.prodigy_decouple,
-            use_bias_correction=args.prodigy_use_bias_correction,
-            safeguard_warmup=args.prodigy_safeguard_warmup,
-        )
+    else:
+        raise ValueError(f"{args.optimizer} optimizer is not supported.")
 
     # Dataset and DataLoaders creation:
     train_dataset = DreamBoothDataset(
@@ -1402,8 +1339,6 @@ def main(args):
         del tokenizer_one, tokenizer_two, tokenizer_three
         del text_encoder_one, text_encoder_two, text_encoder_three
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
     # If custom instance prompts are NOT provided (i.e. the instance prompt is used for all images),
     # pack the statically computed variables appropriately here. This is so that we don't
@@ -1549,6 +1484,9 @@ def main(args):
         while len(sigma.shape) < n_dim:
             sigma = sigma.unsqueeze(-1)
         return sigma
+
+    for block in transformer.transformer_blocks:
+        block.attn.processor = GaudiJointAttnProcessor2_0(is_training=True)
 
     t0 = None
     t_start = time.perf_counter()
@@ -1771,10 +1709,10 @@ def main(args):
                 pipeline = GaudiStableDiffusion3Pipeline.from_pretrained(
                     args.pretrained_model_name_or_path,
                     vae=vae,
-                    text_encoder=accelerator.unwrap_model(text_encoder_one),
-                    text_encoder_2=accelerator.unwrap_model(text_encoder_two),
-                    text_encoder_3=accelerator.unwrap_model(text_encoder_three),
-                    transformer=accelerator.unwrap_model(transformer),
+                    text_encoder=accelerator.unwrap_model(text_encoder_one, keep_fp32_wrapper=False),
+                    text_encoder_2=accelerator.unwrap_model(text_encoder_two, keep_fp32_wrapper=False),
+                    text_encoder_3=accelerator.unwrap_model(text_encoder_three, keep_fp32_wrapper=False),
+                    transformer=accelerator.unwrap_model(transformer, keep_fp32_wrapper=False),
                     revision=args.revision,
                     variant=args.variant,
                     torch_dtype=weight_dtype,
@@ -1784,6 +1722,13 @@ def main(args):
                     gaudi_config=args.gaudi_config_name,
                 )
                 pipeline_args = {"prompt": args.validation_prompt}
+
+                pipeline.transformer.eval()
+                if args.train_text_encoder:
+                    pipeline.text_encoder.eval()
+                    pipeline.text_encoder_2.eval()
+                    pipeline.text_encoder_3.eval()
+
                 images = log_validation(
                     pipeline=pipeline,
                     args=args,
@@ -1793,7 +1738,6 @@ def main(args):
                 )
                 if not args.train_text_encoder:
                     del text_encoder_one, text_encoder_two, text_encoder_three
-                    torch.cuda.empty_cache()
                     gc.collect()
 
     if t0 is not None:
