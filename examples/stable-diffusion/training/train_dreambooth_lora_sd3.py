@@ -179,6 +179,11 @@ def log_validation(
     with autocast_ctx:
         images = [pipeline(**pipeline_args, generator=generator, is_training=is_training).images[0] for _ in range(args.num_validation_images)]
 
+    if args.save_validation_images:
+        os.makedirs(args.save_validation_images_path, exist_ok=True)
+        for idx, image in enumerate(images):
+            image.save(f"{args.save_validation_images_path}/img_{epoch+1}_{idx}.png")
+
     for tracker in accelerator.trackers:
         phase_name = "test" if is_final_validation else "validation"
         if tracker.name == "tensorboard":
@@ -323,9 +328,21 @@ def parse_args(input_args=None):
         type=int,
         default=50,
         help=(
-            "Run dreambooth validation every X epochs. Dreambooth validation consists of running the prompt"
+            "Run validation every X epochs. Validation consists of running the prompt"
             " `args.validation_prompt` multiple times: `args.num_validation_images`."
         ),
+    )
+    parser.add_argument(
+        "--save_validation_images",
+        default=False,
+        action="store_true",
+        help="Flag to save validation images into files.",
+    )
+    parser.add_argument(
+        "--save_validation_images_path",
+        type=str,
+        default="sd3_validation_images",
+        help="Path to save validation images if `args.save_validation_images` is enabled.",
     )
     parser.add_argument(
         "--with_prior_preservation",
@@ -346,7 +363,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="sd3-dreambooth",
+        default="sd3_output",
         help="The output directory where the model predictions and checkpoints will be written.",
     )
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
@@ -1700,7 +1717,7 @@ def main(args):
 
         hb_profiler.stop()
         if accelerator.is_main_process:
-            if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
+            if args.validation_prompt is not None and (epoch + 1) % args.validation_epochs == 0:
                 # create pipeline
                 if not args.train_text_encoder:
                     text_encoder_one, text_encoder_two, text_encoder_three = load_text_encoders(
