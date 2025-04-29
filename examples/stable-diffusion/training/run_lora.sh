@@ -1,12 +1,11 @@
-#python \
-python ../../gaudi_spawn.py --world_size 2 \
-train_text_to_image_sd3.py \
+python train_dreambooth_lora_sd3.py \
     --pretrained_model_name_or_path="stabilityai/stable-diffusion-3-medium-diffusers" \
     --dataset_name="dog" \
     --instance_prompt="a photo of sks dog" \
     --validation_prompt="a photo of sks dog in a bucket" \
-    --output_dir="dog_ft_sd3" \
+    --output_dir="dog_lora_sd3" \
     --mixed_precision="bf16" \
+    --rank=4 \
     --resolution=1024 \
     --train_batch_size=1 \
     --learning_rate=1e-4 \
@@ -20,5 +19,4 @@ train_text_to_image_sd3.py \
     --use_hpu_graphs_for_inference \
     --use_hpu_graphs_for_training \
     --gaudi_config_name="Habana/stable-diffusion" \
-    --sdp_on_bf16 \
     --bf16

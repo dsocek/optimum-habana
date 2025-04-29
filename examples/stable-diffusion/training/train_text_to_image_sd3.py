@@ -33,15 +33,12 @@ import torch
 import torch.utils.checkpoint
 import transformers
 
-from accelerate import DistributedType
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration
 from huggingface_hub import create_repo, upload_folder
 from huggingface_hub.utils import insecure_hashlib
 from PIL import Image
 from PIL.ImageOps import exif_transpose
-from peft import LoraConfig, set_peft_model_state_dict
-from peft.utils import get_peft_model_state_dict
 from torch.utils.data import Dataset
 from torchvision import transforms
 from torchvision.transforms.functional import crop
@@ -53,7 +50,6 @@ from optimum.habana.accelerate import GaudiAccelerator
 from optimum.habana.diffusers import GaudiStableDiffusion3Pipeline
 from optimum.habana.diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import GaudiJointAttnProcessor2_0
 from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
-from optimum.habana.transformers.trainer import _is_peft_model
 from optimum.habana.utils import HabanaProfile, set_seed, to_gb_rounded
 
 import habana_frameworks.torch as htorch
@@ -68,8 +64,6 @@ from diffusers import (
 from diffusers.optimization import get_scheduler
 from diffusers.utils import (
     check_min_version,
-    convert_unet_state_dict_to_peft,
-    convert_state_dict_to_diffusers,
     is_wandb_available,
 )
 from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
@@ -182,9 +176,6 @@ def log_validation(
     autocast_ctx = torch.autocast(accelerator.device.type) if not is_final_validation else nullcontext()
     is_training = not is_final_validation
 
-    #import debugpy
-    #debugpy.breakpoint()
-
     with autocast_ctx:
         images = [pipeline(**pipeline_args, generator=generator, is_training=is_training).images[0] for _ in range(args.num_validation_images)]
 
@@ -206,8 +197,6 @@ def log_validation(
                     ]
                 }
             )
-
-    #del pipeline
 
     return images
 
@@ -350,7 +339,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--save_validation_images_path",
         type=str,
-        default="sd3_lora_validation_images",
+        default="sd3_validation_images",
         help="Path to save validation images if `args.save_validation_images` is enabled.",
     )
     parser.add_argument(
@@ -368,17 +357,6 @@ def parse_args(input_args=None):
             "Minimal class images for prior preservation loss. If there are not enough images already present in"
             " class_data_dir, additional images will be sampled with class_prompt."
         ),
-    )
-    parser.add_argument(
-        "--train_text_encoder",
-        action="store_true",
-        help="Specifies whether to also train the text encoder components in addition to the transformer component.",
-    )
-    parser.add_argument(
-        "--rank",
-        type=int,
-        default=4,
-        help=("The dimension of the LoRA update matrices."),
     )
     parser.add_argument(
         "--output_dir",
@@ -409,6 +387,11 @@ def parse_args(input_args=None):
         "--random_flip",
         action="store_true",
         help="whether to randomly flip images horizontally",
+    )
+    parser.add_argument(
+        "--train_text_encoder",
+        action="store_true",
+        help="Whether to train the text encoder. If set, the text encoder should be float32 precision.",
     )
     parser.add_argument(
         "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
@@ -1116,8 +1099,6 @@ def main(args):
                     image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
                     image.save(image_filename)
 
-            #del pipeline
-
     # Handle the repository creation
     if accelerator.is_main_process:
         if args.output_dir is not None:
@@ -1175,28 +1156,28 @@ def main(args):
         args.pretrained_model_name_or_path, subfolder="transformer", revision=args.revision, variant=args.variant
     )
 
-    # We only train the additional adapter LoRA layers
-    transformer.requires_grad_(False)
+    transformer.requires_grad_(True)
     vae.requires_grad_(False)
-    text_encoder_one.requires_grad_(False)
-    text_encoder_two.requires_grad_(False)
-    text_encoder_three.requires_grad_(False)
+    if args.train_text_encoder:
+        text_encoder_one.requires_grad_(True)
+        text_encoder_two.requires_grad_(True)
+        text_encoder_three.requires_grad_(True)
+    else:
+        text_encoder_one.requires_grad_(False)
+        text_encoder_two.requires_grad_(False)
+        text_encoder_three.requires_grad_(False)
 
-    # For mixed precision training we cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
+    # For mixed precision training we cast all non-trainable weights (vae, non-lora text_encoder and non-lora transformer) to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.
     weight_dtype = torch.float32
     if gaudi_config.use_torch_autocast or accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    # Move unet, vae and text_encoder to device and cast to weight_dtype
-    transformer.to(accelerator.device, dtype=weight_dtype)
-
-    # The VAE is always in float32 to avoid NaN losses.
     vae.to(accelerator.device, dtype=torch.float32)
-
-    text_encoder_one.to(accelerator.device, dtype=weight_dtype)
-    text_encoder_two.to(accelerator.device, dtype=weight_dtype)
-    text_encoder_three.to(accelerator.device, dtype=weight_dtype)
+    if not args.train_text_encoder:
+        text_encoder_one.to(accelerator.device, dtype=weight_dtype)
+        text_encoder_two.to(accelerator.device, dtype=weight_dtype)
+        text_encoder_three.to(accelerator.device, dtype=weight_dtype)
 
     if args.gradient_checkpointing:
         transformer.enable_gradient_checkpointing()
@@ -1205,61 +1186,44 @@ def main(args):
             text_encoder_two.gradient_checkpointing_enable()
             text_encoder_three.gradient_checkpointing_enable()
 
-    # now we will add new LoRA weights to the attention layers
-    transformer_lora_config = LoraConfig(
-        r=args.rank,
-        lora_alpha=args.rank,
-        init_lora_weights="gaussian",
-        target_modules=["to_k", "to_q", "to_v", "to_out.0"],
-    )
-    transformer.add_adapter(transformer_lora_config)
+    transformer.to(accelerator.device, dtype=weight_dtype)
 
-    # The text encoders comes from  ^= ^w transformers, so we cannot directly modify them.
-    # So, instead, we monkey-patch the forward calls of its attention-blocks.
-    if args.train_text_encoder:
-        text_lora_config = LoraConfig(
-            r=args.rank,
-            lora_alpha=args.rank,
-            init_lora_weights="gaussian",
-            target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],
-        )
-        text_encoder_one.add_adapter(text_lora_config)
-        text_encoder_two.add_adapter(text_lora_config)
-        text_encoder_three.add_adapter(text_lora_config)
+    '''
+    # Set pipeline instance
+    pipe = GaudiStableDiffusion3Pipeline.from_pretrained(
+        args.pretrained_model_name_or_path,
+        transformer=accelerator.unwrap_model(transformer, keep_fp32_wrapper=False),
+        text_encoder=accelerator.unwrap_model(text_encoder_one, keep_fp32_wrapper=False),
+        text_encoder_2=accelerator.unwrap_model(text_encoder_two, keep_fp32_wrapper=False),
+        text_encoder_3=accelerator.unwrap_model(text_encoder_three, keep_fp32_wrapper=False),
+        tokenizer=tokenizer_one,
+        tokenizer_2=tokenizer_two,
+        tokenizer_3=tokenizer_three,
+        vae=vae,
+        scheduler=noise_scheduler,
+        revision=args.revision,
+        variant=args.variant,
+        torch_dtype=weight_dtype,
+        use_habana=True,
+        use_hpu_graphs=args.use_hpu_graphs_for_inference,
+        gaudi_config=args.gaudi_config_name,
+        sdp_on_bf16=args.sdp_on_bf16,
+    )
+    '''
 
     # FIXME: debug only
     #from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
     #transformer = FSDP(transformer, device_id = torch.device("hpu", torch.hpu.current_device()))
 
-    def unwrap_model(model, training=False):
+    def unwrap_model(model):
         model = accelerator.unwrap_model(model)
         model = model._orig_mod if is_compiled_module(model) else model
-        if not training:
-            return model
-        else:
-            if accelerator.distributed_type == DistributedType.MULTI_HPU:
-                kwargs = {}
-                kwargs["gradient_as_bucket_view"] = True
-                accelerator.ddp_handler = DistributedDataParallelKwargs(**kwargs)
-            if args.use_hpu_graphs_for_training:
-                if _is_peft_model(model):
-                    base_model = model.get_base_model()
-                    htcore.hpu.ModuleCacher()(model=base_model, inplace=True)
-                else:
-                    htcore.hpu.ModuleCacher()(model=model, inplace=True)
-            return model
+        return model
 
     # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
     def save_model_hook(models, weights, output_dir):
         if accelerator.is_main_process:
-            # there are only two options here. Either are just the transformer attn processor layers
-            # or there are the transformer and text encoders atten layers
-            unet_lora_layers_to_save = None
-            text_encoder_one_lora_layers_to_save = None
-            text_encoder_two_lora_layers_to_save = None
-            text_encoder_three_lora_layers_to_save = None
-
-            for model in models:
+            for i, model in enumerate(models):
                 if isinstance(unwrap_model(model), SD3Transformer2DModel):
                     unwrap_model(model).save_pretrained(os.path.join(output_dir, "transformer"))
                 elif isinstance(unwrap_model(model), (CLIPTextModelWithProjection, T5EncoderModel)):
@@ -1277,59 +1241,38 @@ def main(args):
                 # make sure to pop weight so that corresponding model is not saved again
                 weights.pop()
 
-            GaudiStableDiffusion3Pipeline.save_lora_weights(
-                output_dir,
-                transformer_lora_layers=transformer_lora_layers_to_save,
-                text_encoder_lora_layers=text_encoder_one_lora_layers_to_save,
-                text_encoder_2_lora_layers=text_encoder_two_lora_layers_to_save,
-                text_encoder_3_lora_layers=text_encoder_three_lora_layers_to_save,
-            )
-
     def load_model_hook(models, input_dir):
-        transformer_ = None
-        text_encoder_one_ = None
-        text_encoder_two_ = None
-        text_encoder_three_ = None
-
-        while len(models) > 0:
+        for _ in range(len(models)):
+            # pop models so that they are not loaded again
             model = models.pop()
 
-            if isinstance(model, type(unwrap_model(transformer))):
-                transformer_ = model
-            elif isinstance(model, type(unwrap_model(text_encoder_one))):
-                text_encoder_one_ = model
-            elif isinstance(model, type(unwrap_model(text_encoder_two))):
-                text_encoder_two_ = model
-            elif isinstance(model, type(unwrap_model(text_encoder_three))):
-                text_encoder_three_ = model
+            # load diffusers style into model
+            if isinstance(unwrap_model(model), SD3Transformer2DModel):
+                load_model = SD3Transformer2DModel.from_pretrained(input_dir, subfolder="transformer")
+                model.register_to_config(**load_model.config)
+
+                model.load_state_dict(load_model.state_dict())
+            elif isinstance(unwrap_model(model), (CLIPTextModelWithProjection, T5EncoderModel)):
+                try:
+                    load_model = CLIPTextModelWithProjection.from_pretrained(input_dir, subfolder="text_encoder")
+                    model(**load_model.config)
+                    model.load_state_dict(load_model.state_dict())
+                except Exception:
+                    try:
+                        load_model = CLIPTextModelWithProjection.from_pretrained(input_dir, subfolder="text_encoder_2")
+                        model(**load_model.config)
+                        model.load_state_dict(load_model.state_dict())
+                    except Exception:
+                        try:
+                            load_model = T5EncoderModel.from_pretrained(input_dir, subfolder="text_encoder_3")
+                            model(**load_model.config)
+                            model.load_state_dict(load_model.state_dict())
+                        except Exception:
+                            raise ValueError(f"Couldn't load the model of type: ({type(model)}).")
             else:
-                raise ValueError(f"unexpected load model: {model.__class__}")
+                raise ValueError(f"Unsupported model found: {type(model)=}")
 
-        lora_state_dict = StableDiffusion3Pipeline.lora_state_dict(input_dir)
-
-        transformer_state_dict = {
-            f"{k.replace('transformer.', '')}": v for k, v in lora_state_dict.items() if k.startswith("transformer.")
-        }
-        transformer_state_dict = convert_unet_state_dict_to_peft(transformer_state_dict)
-        incompatible_keys = set_peft_model_state_dict(transformer_, transformer_state_dict, adapter_name="default")
-        if incompatible_keys is not None:
-            # check only for unexpected keys
-            unexpected_keys = getattr(incompatible_keys, "unexpected_keys", None)
-            if unexpected_keys:
-                logger.warning(
-                    f"Loading adapter weights from state_dict led to unexpected keys not found in the model: "
-                    f" {unexpected_keys}. "
-                )
-
-        if args.train_text_encoder:
-            # Do we need to call `scale_lora_layers()` here?
-            _set_state_dict_into_text_encoder(lora_state_dict, prefix="text_encoder.", text_encoder=text_encoder_one_)
-            _set_state_dict_into_text_encoder(
-                lora_state_dict, prefix="text_encoder_2.", text_encoder=text_encoder_two_
-            )
-            _set_state_dict_into_text_encoder(
-                lora_state_dict, prefix="text_encoder_3.", text_encoder=text_encoder_three_
-            )
+            del load_model
 
     accelerator.register_save_state_pre_hook(save_model_hook)
     accelerator.register_load_state_pre_hook(load_model_hook)
@@ -1340,16 +1283,9 @@ def main(args):
         )
 
     # Optimization parameters
-    transformer_parameters = list(filter(lambda p: p.requires_grad, transformer.parameters()))
-
-    if args.train_text_encoder:
-        text_parameters_one = list(filter(lambda p: p.requires_grad, text_encoder_one.parameters()))
-        text_parameters_two = list(filter(lambda p: p.requires_grad, text_encoder_two.parameters()))
-        text_parameters_three = list(filter(lambda p: p.requires_grad, text_encoder_three.parameters()))
-
     transformer_parameters_with_lr = {"params": transformer.parameters(), "lr": args.learning_rate}
     if args.train_text_encoder:
-        # different learning rate for text encoder and transformer
+        # different learning rate for text encoder and unet
         text_parameters_one_with_lr = {
             "params": text_encoder_one.parameters(),
             "weight_decay": args.adam_weight_decay_text_encoder,
@@ -1530,12 +1466,6 @@ def main(args):
         record_shapes=False,
     )
 
-    unwrap_model(model=transformer, training=True)
-    if args.train_text_encoder:
-        unwrap_model(model=text_encoder_one, training=True)
-        unwrap_model(model=text_encoder_two, training=True)
-        unwrap_model(model=text_encoder_three, training=True)
-
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
@@ -1597,7 +1527,10 @@ def main(args):
             sigma = sigma.unsqueeze(-1)
         return sigma
 
-    for block in transformer.transformer_blocks:
+    #for block in transformer.transformer_blocks:
+    #    block.attn.processor = GaudiJointAttnProcessor2_0(is_training=True)
+    module = transformer.module if hasattr(transformer, "module") else transformer
+    for block in module.transformer_blocks:
         block.attn.processor = GaudiJointAttnProcessor2_0(is_training=True)
 
     t0 = None
@@ -1615,11 +1548,6 @@ def main(args):
             text_encoder_one.train()
             text_encoder_two.train()
             text_encoder_three.train()
-
-            # set top parameter requires_grad = True for gradient checkpointing works
-            accelerator.unwrap_model(text_encoder_one).text_model.embeddings.requires_grad_(True)
-            accelerator.unwrap_model(text_encoder_two).text_model.embeddings.requires_grad_(True)
-            accelerator.unwrap_model(text_encoder_three).text_model.embeddings.requires_grad_(True)
 
         for step, batch in enumerate(train_dataloader):
             if t0 is None and global_step == args.throughput_warmup_steps:
@@ -1738,9 +1666,14 @@ def main(args):
 
                 if accelerator.sync_gradients:
                     params_to_clip = (
-                        itertools.chain(transformer_parameters, text_parameters_one, text_parameters_two, text_parameters_three)
+                        itertools.chain(
+                            transformer.parameters(),
+                            text_encoder_one.parameters(),
+                            text_encoder_two.parameters(),
+                            text_encoder_three.parameters(),
+                        )
                         if args.train_text_encoder
-                        else transformer_parameters
+                        else transformer.parameters()
                     )
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
@@ -1812,8 +1745,7 @@ def main(args):
 
         hb_profiler.stop()
         if accelerator.is_main_process:
-            #if args.validation_prompt is not None and (epoch + 1) % args.validation_epochs == 0:
-            if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
+            if args.validation_prompt is not None and (epoch + 1) % args.validation_epochs == 0:
                 # create pipeline
                 #if not args.train_text_encoder:
                 #    text_encoder_one, text_encoder_two, text_encoder_three = load_text_encoders(
@@ -1833,6 +1765,7 @@ def main(args):
                     use_habana=True,
                     use_hpu_graphs=args.use_hpu_graphs_for_inference,
                     gaudi_config=args.gaudi_config_name,
+                    sdp_on_bf16=args.sdp_on_bf16,
                 )
                 pipeline_args = {"prompt": args.validation_prompt}
 
@@ -1849,16 +1782,47 @@ def main(args):
                     pipeline_args=pipeline_args,
                     epoch=epoch,
                 )
+                #if not args.train_text_encoder:
+                #    del text_encoder_one, text_encoder_two, text_encoder_three
+                #    gc.collect()
+
                 pipeline.transformer.train()
                 if args.train_text_encoder:
                     pipeline.text_encoder.train()
                     pipeline.text_encoder_2.train()
                     pipeline.text_encoder_3.train()
+                '''
+                pipe.transformer = accelerator.unwrap_model(transformer, keep_fp32_wrapper=False)
+                pipe.text_encoder = accelerator.unwrap_model(text_encoder_one, keep_fp32_wrapper=False)
+                pipe.text_encoder_2 = accelerator.unwrap_model(text_encoder_two, keep_fp32_wrapper=False)
+                pipe.text_encoder_3 = accelerator.unwrap_model(text_encoder_three, keep_fp32_wrapper=False)
+                pipeline_args = {"prompt": args.validation_prompt}
 
-                #if not args.train_text_encoder:
-                #    del text_encoder_one, text_encoder_two, text_encoder_three
-                #    gc.collect()
-                #del pipeline
+                print("VALIDATION")
+
+                pipe.transformer.eval()
+                if args.train_text_encoder:
+                    pipe.text_encoder.eval()
+                    pipe.text_encoder_2.eval()
+                    pipe.text_encoder_3.eval()
+
+                images = log_validation(
+                    pipeline=pipe,
+                    args=args,
+                    accelerator=accelerator,
+                    pipeline_args=pipeline_args,
+                    epoch=epoch,
+                )
+                if not args.train_text_encoder:
+                    del text_encoder_one, text_encoder_two, text_encoder_three
+                    gc.collect()
+
+                pipeline.transformer.train()
+                if args.train_text_encoder:
+                    pipe.text_encoder.train()
+                    pipe.text_encoder_2.train()
+                    pipe.text_encoder_3.train()
+                '''
 
     if t0 is not None:
         duration = time.perf_counter() - t0 - (checkpoint_time if args.adjust_throughput else 0)
@@ -1877,43 +1841,23 @@ def main(args):
             with open(f"{args.output_dir}/speed_metrics.json", mode="w") as file:
                 json.dump(metrics, file)
 
-    # Save trained lora layers
+    # Save fine-tuned model
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        transformer = unwrap_model(transformer)
-        transformer = transformer.to(torch.float32)
-        transformer_lora_layers = convert_state_dict_to_diffusers(get_peft_model_state_dict(transformer))
 
-        if args.train_text_encoder:
-            text_encoder_one = unwrap_model(text_encoder_one)
-            text_encoder_two = unwrap_model(text_encoder_two)
-            text_encoder_three = unwrap_model(text_encoder_three)
-            text_encoder_lora_layers = convert_state_dict_to_diffusers(
-                get_peft_model_state_dict(text_encoder_one.to(torch.float32))
-            )
-            text_encoder_2_lora_layers = convert_state_dict_to_diffusers(
-                get_peft_model_state_dict(text_encoder_two.to(torch.float32))
-            )
-            text_encoder_3_lora_layers = convert_state_dict_to_diffusers(
-                get_peft_model_state_dict(text_encoder_three.to(torch.float32))
-            )
-        else:
-            text_encoder_lora_layers = None
-            text_encoder_2_lora_layers = None
-            text_encoder_3_lora_layers = None
-        # save lora weights
-        GaudiStableDiffusion3Pipeline.save_lora_weights(
-            save_directory=args.output_dir,
-            transformer_lora_layers=transformer_lora_layers,
-            text_encoder_lora_layers=text_encoder_lora_layers,
-            text_encoder_2_lora_layers=text_encoder_2_lora_layers,
-            text_encoder_3_lora_layers=text_encoder_3_lora_layers,
-        )
-
-        # Final inference:
-        # load original model
+        # Final inference
+        print("**************** FINAL")
+        #if not args.train_text_encoder:
+        #    text_encoder_one, text_encoder_two, text_encoder_three = load_text_encoders(
+        #        accelerator, text_encoder_cls_one, text_encoder_cls_two, text_encoder_cls_three
+        #    )
         pipeline = GaudiStableDiffusion3Pipeline.from_pretrained(
             args.pretrained_model_name_or_path,
+            transformer=accelerator.unwrap_model(transformer, keep_fp32_wrapper=False),
+            text_encoder=accelerator.unwrap_model(text_encoder_one, keep_fp32_wrapper=False),
+            text_encoder_2=accelerator.unwrap_model(text_encoder_two, keep_fp32_wrapper=False),
+            text_encoder_3=accelerator.unwrap_model(text_encoder_three, keep_fp32_wrapper=False),
+            vae=vae,
             revision=args.revision,
             variant=args.variant,
             torch_dtype=weight_dtype,
@@ -1922,9 +1866,66 @@ def main(args):
             use_hpu_graphs=args.use_hpu_graphs_for_inference,
             gaudi_config=args.gaudi_config_name,
         )
-        # load saved lora weights
-        pipeline.load_lora_weights(args.output_dir)
-        # run final inference
+        pipeline_args = {"prompt": args.validation_prompt}
+        pipeline.transformer.eval()
+        if args.train_text_encoder:
+            pipeline.text_encoder.eval()
+            pipeline.text_encoder_2.eval()
+            pipeline.text_encoder_3.eval()
+        images = log_validation(
+            pipeline=pipeline,
+            args=args,
+            accelerator=accelerator,
+            pipeline_args=pipeline_args,
+            epoch=epoch,
+            is_final_validation=True,
+        )
+
+        transformer = unwrap_model(transformer)
+
+        if args.train_text_encoder:
+            text_encoder_one = unwrap_model(text_encoder_one)
+            text_encoder_two = unwrap_model(text_encoder_two)
+            text_encoder_three = unwrap_model(text_encoder_three)
+            pipeline = GaudiStableDiffusion3Pipeline.from_pretrained(
+                args.pretrained_model_name_or_path,
+                transformer=transformer,
+                text_encoder=text_encoder_one,
+                text_encoder_2=text_encoder_two,
+                text_encoder_3=text_encoder_three,
+                scheduler=noise_scheduler,
+                use_habana=True,
+                use_hpu_graphs=args.use_hpu_graphs_for_inference,
+                gaudi_config=args.gaudi_config_name,
+            )
+        else:
+            pipeline = GaudiStableDiffusion3Pipeline.from_pretrained(
+                args.pretrained_model_name_or_path,
+                transformer=transformer,
+                scheduler=noise_scheduler,
+                use_habana=True,
+                use_hpu_graphs=args.use_hpu_graphs_for_inference,
+                gaudi_config=args.gaudi_config_name,
+            )
+
+        # save the pipeline
+        pipeline.save_pretrained(args.output_dir)
+
+        # Final inference
+        '''
+        # Load previous pipeline
+        pipeline = GaudiStableDiffusion3Pipeline.from_pretrained(
+            args.output_dir,
+            revision=args.revision,
+            variant=args.variant,
+            torch_dtype=weight_dtype,
+            scheduler=noise_scheduler,
+            use_habana=True,
+            use_hpu_graphs=args.use_hpu_graphs_for_inference,
+            gaudi_config=args.gaudi_config_name,
+        )
+
+        # run inference
         images = []
         if args.validation_prompt and args.num_validation_images > 0:
             pipeline_args = {"prompt": args.validation_prompt}
@@ -1936,6 +1937,7 @@ def main(args):
                 epoch=epoch,
                 is_final_validation=True,
             )
+        '''
 
         # Push to HF Hub (if --push_to_hub was specified)
         if args.push_to_hub:
