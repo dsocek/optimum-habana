@@ -15,7 +15,6 @@
 
 import argparse
 import copy
-import gc
 import itertools
 import json
 import logging
@@ -28,20 +27,37 @@ import warnings
 from contextlib import nullcontext
 from pathlib import Path
 
+import diffusers
+import habana_frameworks.torch as htorch
+import habana_frameworks.torch.core as htcore
 import numpy as np
 import torch
 import torch.utils.checkpoint
 import transformers
-
 from accelerate import DistributedType
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration
+from diffusers import (
+    AutoencoderKL,
+    FlowMatchEulerDiscreteScheduler,
+    SD3Transformer2DModel,
+)
+from diffusers.optimization import get_scheduler
+from diffusers.training_utils import _set_state_dict_into_text_encoder
+from diffusers.utils import (
+    check_min_version,
+    convert_state_dict_to_diffusers,
+    convert_unet_state_dict_to_peft,
+    is_wandb_available,
+)
+from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
+from diffusers.utils.torch_utils import is_compiled_module
 from huggingface_hub import create_repo, upload_folder
 from huggingface_hub.utils import insecure_hashlib
-from PIL import Image
-from PIL.ImageOps import exif_transpose
 from peft import LoraConfig, set_peft_model_state_dict
 from peft.utils import get_peft_model_state_dict
+from PIL import Image
+from PIL.ImageOps import exif_transpose
 from torch.utils.data import Dataset
 from torchvision import transforms
 from torchvision.transforms.functional import crop
@@ -51,29 +67,12 @@ from transformers import CLIPTextModelWithProjection, CLIPTokenizer, PretrainedC
 from optimum.habana import GaudiConfig
 from optimum.habana.accelerate import GaudiAccelerator
 from optimum.habana.diffusers import GaudiStableDiffusion3Pipeline
-from optimum.habana.diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import GaudiJointAttnProcessor2_0
+from optimum.habana.diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import (
+    GaudiJointAttnProcessor2_0,
+)
 from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
 from optimum.habana.transformers.trainer import _is_peft_model
 from optimum.habana.utils import HabanaProfile, set_seed, to_gb_rounded
-
-import habana_frameworks.torch as htorch
-import habana_frameworks.torch.core as htcore
-
-import diffusers
-from diffusers import (
-    AutoencoderKL,
-    FlowMatchEulerDiscreteScheduler,
-    SD3Transformer2DModel,
-)
-from diffusers.optimization import get_scheduler
-from diffusers.utils import (
-    check_min_version,
-    convert_unet_state_dict_to_peft,
-    convert_state_dict_to_diffusers,
-    is_wandb_available,
-)
-from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
-from diffusers.utils.torch_utils import is_compiled_module
 
 
 if is_wandb_available():
@@ -1090,10 +1089,10 @@ def main(args):
                 torch_dtype=torch_dtype,
                 revision=args.revision,
                 variant=args.variant,
-                scheduler=noise_scheduler,
                 use_habana=True,
                 use_hpu_graphs=args.use_hpu_graphs_for_inference,
                 gaudi_config=args.gaudi_config_name,
+                sdp_on_bf16=args.sdp_on_bf16,
             )
             pipeline.set_progress_bar_config(disable=True)
 
@@ -1115,8 +1114,6 @@ def main(args):
                     hash_image = insecure_hashlib.sha1(image.tobytes()).hexdigest()
                     image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
                     image.save(image_filename)
-
-            #del pipeline
 
     # Handle the repository creation
     if accelerator.is_main_process:
@@ -1254,23 +1251,35 @@ def main(args):
         if accelerator.is_main_process:
             # there are only two options here. Either are just the transformer attn processor layers
             # or there are the transformer and text encoders atten layers
-            unet_lora_layers_to_save = None
+            transformer_lora_layers_to_save = None
             text_encoder_one_lora_layers_to_save = None
             text_encoder_two_lora_layers_to_save = None
             text_encoder_three_lora_layers_to_save = None
 
             for model in models:
                 if isinstance(unwrap_model(model), SD3Transformer2DModel):
-                    unwrap_model(model).save_pretrained(os.path.join(output_dir, "transformer"))
+                    model = unwrap_model(model)
+                    transformer_lora_layers_to_save = convert_state_dict_to_diffusers(
+                        get_peft_model_state_dict(model)
+                    )
                 elif isinstance(unwrap_model(model), (CLIPTextModelWithProjection, T5EncoderModel)):
                     if isinstance(unwrap_model(model), CLIPTextModelWithProjection):
                         hidden_size = unwrap_model(model).config.hidden_size
                         if hidden_size == 768:
-                            unwrap_model(model).save_pretrained(os.path.join(output_dir, "text_encoder"))
+                            model = unwrap_model(model)
+                            text_encoder_one_lora_layers_to_save = convert_state_dict_to_diffusers(
+                                get_peft_model_state_dict(model)
+                            )
                         elif hidden_size == 1280:
-                            unwrap_model(model).save_pretrained(os.path.join(output_dir, "text_encoder_2"))
+                            model = unwrap_model(model)
+                            text_encoder_two_lora_layers_to_save = convert_state_dict_to_diffusers(
+                                get_peft_model_state_dict(model)
+                            )
                     else:
-                        unwrap_model(model).save_pretrained(os.path.join(output_dir, "text_encoder_3"))
+                        model = unwrap_model(model)
+                        text_encoder_three_lora_layers_to_save = convert_state_dict_to_diffusers(
+                            get_peft_model_state_dict(model)
+                        )
                 else:
                     raise ValueError(f"Wrong model supplied: {type(model)=}.")
 
@@ -1305,7 +1314,7 @@ def main(args):
             else:
                 raise ValueError(f"unexpected load model: {model.__class__}")
 
-        lora_state_dict = StableDiffusion3Pipeline.lora_state_dict(input_dir)
+        lora_state_dict = GaudiStableDiffusion3Pipeline.lora_state_dict(input_dir)
 
         transformer_state_dict = {
             f"{k.replace('transformer.', '')}": v for k, v in lora_state_dict.items() if k.startswith("transformer.")
@@ -1530,11 +1539,11 @@ def main(args):
         record_shapes=False,
     )
 
-    unwrap_model(model=transformer, training=True)
-    if args.train_text_encoder:
-        unwrap_model(model=text_encoder_one, training=True)
-        unwrap_model(model=text_encoder_two, training=True)
-        unwrap_model(model=text_encoder_three, training=True)
+    #unwrap_model(model=transformer, training=True)
+    #if args.train_text_encoder:
+    #    unwrap_model(model=text_encoder_one, training=True)
+    #    unwrap_model(model=text_encoder_two, training=True)
+    #    unwrap_model(model=text_encoder_three, training=True)
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -1617,9 +1626,9 @@ def main(args):
             text_encoder_three.train()
 
             # set top parameter requires_grad = True for gradient checkpointing works
-            accelerator.unwrap_model(text_encoder_one).text_model.embeddings.requires_grad_(True)
-            accelerator.unwrap_model(text_encoder_two).text_model.embeddings.requires_grad_(True)
-            accelerator.unwrap_model(text_encoder_three).text_model.embeddings.requires_grad_(True)
+            #accelerator.unwrap_model(text_encoder_one).text_model.embeddings.requires_grad_(True)
+            #accelerator.unwrap_model(text_encoder_two).text_model.embeddings.requires_grad_(True)
+            #accelerator.unwrap_model(text_encoder_three).text_model.embeddings.requires_grad_(True)
 
         for step, batch in enumerate(train_dataloader):
             if t0 is None and global_step == args.throughput_warmup_steps:
@@ -1812,8 +1821,7 @@ def main(args):
 
         hb_profiler.stop()
         if accelerator.is_main_process:
-            #if args.validation_prompt is not None and (epoch + 1) % args.validation_epochs == 0:
-            if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
+            if args.validation_prompt is not None and (epoch + 1) % args.validation_epochs == 0:
                 # create pipeline
                 #if not args.train_text_encoder:
                 #    text_encoder_one, text_encoder_two, text_encoder_three = load_text_encoders(
@@ -1833,6 +1841,7 @@ def main(args):
                     use_habana=True,
                     use_hpu_graphs=args.use_hpu_graphs_for_inference,
                     gaudi_config=args.gaudi_config_name,
+                    sdp_on_bf16=args.sdp_on_bf16,
                 )
                 pipeline_args = {"prompt": args.validation_prompt}
 

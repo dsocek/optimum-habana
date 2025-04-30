@@ -15,7 +15,6 @@
 
 import argparse
 import copy
-import gc
 import itertools
 import json
 import logging
@@ -28,13 +27,27 @@ import warnings
 from contextlib import nullcontext
 from pathlib import Path
 
+import diffusers
+import habana_frameworks.torch as htorch
+import habana_frameworks.torch.core as htcore
 import numpy as np
 import torch
 import torch.utils.checkpoint
 import transformers
-
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration
+from diffusers import (
+    AutoencoderKL,
+    FlowMatchEulerDiscreteScheduler,
+    SD3Transformer2DModel,
+)
+from diffusers.optimization import get_scheduler
+from diffusers.utils import (
+    check_min_version,
+    is_wandb_available,
+)
+from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
+from diffusers.utils.torch_utils import is_compiled_module
 from huggingface_hub import create_repo, upload_folder
 from huggingface_hub.utils import insecure_hashlib
 from PIL import Image
@@ -48,26 +61,11 @@ from transformers import CLIPTextModelWithProjection, CLIPTokenizer, PretrainedC
 from optimum.habana import GaudiConfig
 from optimum.habana.accelerate import GaudiAccelerator
 from optimum.habana.diffusers import GaudiStableDiffusion3Pipeline
-from optimum.habana.diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import GaudiJointAttnProcessor2_0
+from optimum.habana.diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import (
+    GaudiJointAttnProcessor2_0,
+)
 from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
 from optimum.habana.utils import HabanaProfile, set_seed, to_gb_rounded
-
-import habana_frameworks.torch as htorch
-import habana_frameworks.torch.core as htcore
-
-import diffusers
-from diffusers import (
-    AutoencoderKL,
-    FlowMatchEulerDiscreteScheduler,
-    SD3Transformer2DModel,
-)
-from diffusers.optimization import get_scheduler
-from diffusers.utils import (
-    check_min_version,
-    is_wandb_available,
-)
-from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
-from diffusers.utils.torch_utils import is_compiled_module
 
 
 if is_wandb_available():
@@ -1073,10 +1071,10 @@ def main(args):
                 torch_dtype=torch_dtype,
                 revision=args.revision,
                 variant=args.variant,
-                scheduler=noise_scheduler,
                 use_habana=True,
                 use_hpu_graphs=args.use_hpu_graphs_for_inference,
                 gaudi_config=args.gaudi_config_name,
+                sdp_on_bf16=args.sdp_on_bf16,
             )
             pipeline.set_progress_bar_config(disable=True)
 
@@ -1187,29 +1185,6 @@ def main(args):
             text_encoder_three.gradient_checkpointing_enable()
 
     transformer.to(accelerator.device, dtype=weight_dtype)
-
-    '''
-    # Set pipeline instance
-    pipe = GaudiStableDiffusion3Pipeline.from_pretrained(
-        args.pretrained_model_name_or_path,
-        transformer=accelerator.unwrap_model(transformer, keep_fp32_wrapper=False),
-        text_encoder=accelerator.unwrap_model(text_encoder_one, keep_fp32_wrapper=False),
-        text_encoder_2=accelerator.unwrap_model(text_encoder_two, keep_fp32_wrapper=False),
-        text_encoder_3=accelerator.unwrap_model(text_encoder_three, keep_fp32_wrapper=False),
-        tokenizer=tokenizer_one,
-        tokenizer_2=tokenizer_two,
-        tokenizer_3=tokenizer_three,
-        vae=vae,
-        scheduler=noise_scheduler,
-        revision=args.revision,
-        variant=args.variant,
-        torch_dtype=weight_dtype,
-        use_habana=True,
-        use_hpu_graphs=args.use_hpu_graphs_for_inference,
-        gaudi_config=args.gaudi_config_name,
-        sdp_on_bf16=args.sdp_on_bf16,
-    )
-    '''
 
     # FIXME: debug only
     #from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -1791,38 +1766,6 @@ def main(args):
                     pipeline.text_encoder.train()
                     pipeline.text_encoder_2.train()
                     pipeline.text_encoder_3.train()
-                '''
-                pipe.transformer = accelerator.unwrap_model(transformer, keep_fp32_wrapper=False)
-                pipe.text_encoder = accelerator.unwrap_model(text_encoder_one, keep_fp32_wrapper=False)
-                pipe.text_encoder_2 = accelerator.unwrap_model(text_encoder_two, keep_fp32_wrapper=False)
-                pipe.text_encoder_3 = accelerator.unwrap_model(text_encoder_three, keep_fp32_wrapper=False)
-                pipeline_args = {"prompt": args.validation_prompt}
-
-                print("VALIDATION")
-
-                pipe.transformer.eval()
-                if args.train_text_encoder:
-                    pipe.text_encoder.eval()
-                    pipe.text_encoder_2.eval()
-                    pipe.text_encoder_3.eval()
-
-                images = log_validation(
-                    pipeline=pipe,
-                    args=args,
-                    accelerator=accelerator,
-                    pipeline_args=pipeline_args,
-                    epoch=epoch,
-                )
-                if not args.train_text_encoder:
-                    del text_encoder_one, text_encoder_two, text_encoder_three
-                    gc.collect()
-
-                pipeline.transformer.train()
-                if args.train_text_encoder:
-                    pipe.text_encoder.train()
-                    pipe.text_encoder_2.train()
-                    pipe.text_encoder_3.train()
-                '''
 
     if t0 is not None:
         duration = time.perf_counter() - t0 - (checkpoint_time if args.adjust_throughput else 0)
@@ -1846,7 +1789,6 @@ def main(args):
     if accelerator.is_main_process:
 
         # Final inference
-        print("**************** FINAL")
         #if not args.train_text_encoder:
         #    text_encoder_one, text_encoder_two, text_encoder_three = load_text_encoders(
         #        accelerator, text_encoder_cls_one, text_encoder_cls_two, text_encoder_cls_three
@@ -1897,6 +1839,7 @@ def main(args):
                 use_habana=True,
                 use_hpu_graphs=args.use_hpu_graphs_for_inference,
                 gaudi_config=args.gaudi_config_name,
+                sdp_on_bf16=args.sdp_on_bf16,
             )
         else:
             pipeline = GaudiStableDiffusion3Pipeline.from_pretrained(
@@ -1906,38 +1849,11 @@ def main(args):
                 use_habana=True,
                 use_hpu_graphs=args.use_hpu_graphs_for_inference,
                 gaudi_config=args.gaudi_config_name,
+                sdp_on_bf16=args.sdp_on_bf16,
             )
 
         # save the pipeline
         pipeline.save_pretrained(args.output_dir)
-
-        # Final inference
-        '''
-        # Load previous pipeline
-        pipeline = GaudiStableDiffusion3Pipeline.from_pretrained(
-            args.output_dir,
-            revision=args.revision,
-            variant=args.variant,
-            torch_dtype=weight_dtype,
-            scheduler=noise_scheduler,
-            use_habana=True,
-            use_hpu_graphs=args.use_hpu_graphs_for_inference,
-            gaudi_config=args.gaudi_config_name,
-        )
-
-        # run inference
-        images = []
-        if args.validation_prompt and args.num_validation_images > 0:
-            pipeline_args = {"prompt": args.validation_prompt}
-            images = log_validation(
-                pipeline=pipeline,
-                args=args,
-                accelerator=accelerator,
-                pipeline_args=pipeline_args,
-                epoch=epoch,
-                is_final_validation=True,
-            )
-        '''
 
         # Push to HF Hub (if --push_to_hub was specified)
         if args.push_to_hub:

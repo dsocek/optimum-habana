@@ -8,7 +8,7 @@ python train_dreambooth_lora_sd3.py \
     --rank=4 \
     --resolution=1024 \
     --train_batch_size=1 \
-    --learning_rate=1e-4 \
+    --learning_rate=2e-5 \
     --max_grad_norm=1 \
     --report_to="tensorboard" \
     --lr_scheduler="constant" \
