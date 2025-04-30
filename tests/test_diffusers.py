@@ -2929,6 +2929,78 @@ class DreamBoothLoRASDXL(TestCase):
         self._test_dreambooth_lora_sdxl(train_text_encoder=False)
 
 
+class DreamBoothLoRASD3(TestCase):
+    def _test_dreambooth_lora_sd3(self, train_text_encoder=False):
+        path_to_script = (
+            Path(os.path.dirname(__file__)).parent
+            / "examples"
+            / "stable-diffusion"
+            / "training"
+            / "train_dreambooth_lora_sd3.py"
+        )
+        install_requirements(path_to_script.parent / "requirements.txt")
+
+        instance_prompt = "a photo of sks dog"
+        validation_prompt = "a photo of sks dog in a bucket"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_args = f"""
+                python3
+                {path_to_script}
+                --pretrained_model_name_or_path stabilityai/stable-diffusion-3-medium-diffusers
+                --dataset_name {Path(os.path.dirname(__file__)) / "resource/img/dog"}
+                --resolution 256
+                --train_batch_size 1
+                --gradient_accumulation_steps 1
+                --max_train_steps 20
+                --rank 4
+                --learning_rate 1e-04
+                --max_grad_norm 1
+                --lr_scheduler constant
+                --lr_warmup_steps 0
+                --gaudi_config_name Habana/stable-diffusion
+                --use_hpu_graphs_for_training
+                --use_hpu_graphs_for_inference
+                --mixed_precision bf16
+                --bf16
+                --num_validation_images 1
+                --output_dir {tmpdir}
+                """.split()
+            if train_text_encoder:
+                test_args.append("--train_text_encoder")
+            test_args.append("--instance_prompt")
+            test_args.append(instance_prompt)
+            test_args.append("--validation_prompt")
+            test_args.append(validation_prompt)
+            p = subprocess.Popen(test_args)
+            return_code = p.wait()
+
+            # Ensure the run finished without any issue
+            self.assertEqual(return_code, 0)
+            # save_pretrained smoke test
+            self.assertTrue(os.path.isfile(os.path.join(tmpdir, "pytorch_lora_weights.safetensors")))
+
+            # make sure the state_dict has the correct naming in the parameters.
+            lora_state_dict = safetensors.torch.load_file(os.path.join(tmpdir, "pytorch_lora_weights.safetensors"))
+            is_lora = all("lora" in k for k in lora_state_dict.keys())
+            self.assertTrue(is_lora)
+
+            # when not training the text encoder, all the parameters in the state dict should start
+            # with `"unet"` in their names.
+            if train_text_encoder:
+                starts_with_transformer = all(
+                    k.startswith("transformer") or k.startswith("text_encoder") or k.startswith("text_encoder_2")
+                    for k in lora_state_dict.keys()
+                )
+            else:
+                starts_with_transformer = all(key.startswith("transformer") for key in lora_state_dict.keys())
+            self.assertTrue(starts_with_transformer)
+
+    def test_dreambooth_lora_sd3(self):
+        os.environ["PT_HPU_MAX_COMPOUND_OP_SIZE"] = '1'
+        self._test_dreambooth_lora_sd3(train_text_encoder=False)
+        os.environ.pop("PT_HPU_MAX_COMPOUND_OP_SIZE", None)
+
+        
 class GaudiStableVideoDiffusionPipelineTester(TestCase):
     """
     Tests the StableVideoDiffusionPipeline for Gaudi.
