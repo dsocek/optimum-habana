@@ -181,16 +181,13 @@ def log_validation(
     autocast_ctx = torch.autocast(accelerator.device.type) if not is_final_validation else nullcontext()
     is_training = not is_final_validation
 
-    #import debugpy
-    #debugpy.breakpoint()
-
     with autocast_ctx:
         images = [pipeline(**pipeline_args, generator=generator, is_training=is_training).images[0] for _ in range(args.num_validation_images)]
 
     if args.save_validation_images:
         os.makedirs(args.save_validation_images_path, exist_ok=True)
         for idx, image in enumerate(images):
-            image.save(f"{args.save_validation_images_path}/img_{epoch+1}_{idx}.png")
+            image.save(f"{args.save_validation_images_path}/img_{epoch+1:04d}_{idx}.png")
 
     for tracker in accelerator.trackers:
         phase_name = "test" if is_final_validation else "validation"
@@ -334,7 +331,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--validation_epochs",
         type=int,
-        default=50,
+        default=100,
         help=(
             "Run validation every X epochs. Validation consists of running the prompt"
             " `args.validation_prompt` multiple times: `args.num_validation_images`."
@@ -1286,12 +1283,15 @@ def main(args):
                 # make sure to pop weight so that corresponding model is not saved again
                 weights.pop()
 
+            # Current diffusers do not support saving lora layers for 3rd text encoder:
+            # https://github.com/huggingface/diffusers/blob/38ced7ee594089ef0a19e3b4b1bffb3b3c6b1bbc/src/diffusers/loaders/lora_pipeline.py#L1045
+            # TODO: We can add this easily to diffusers in the future, but for now we save what we can
             GaudiStableDiffusion3Pipeline.save_lora_weights(
                 output_dir,
                 transformer_lora_layers=transformer_lora_layers_to_save,
                 text_encoder_lora_layers=text_encoder_one_lora_layers_to_save,
                 text_encoder_2_lora_layers=text_encoder_two_lora_layers_to_save,
-                text_encoder_3_lora_layers=text_encoder_three_lora_layers_to_save,
+                #text_encoder_3_lora_layers=text_encoder_three_lora_layers_to_save,
             )
 
     def load_model_hook(models, input_dir):
@@ -1606,7 +1606,10 @@ def main(args):
             sigma = sigma.unsqueeze(-1)
         return sigma
 
-    for block in transformer.transformer_blocks:
+    #for block in transformer.transformer_blocks:
+    #    block.attn.processor = GaudiJointAttnProcessor2_0(is_training=True)
+    module = transformer.module if hasattr(transformer, "module") else transformer
+    for block in module.transformer_blocks:
         block.attn.processor = GaudiJointAttnProcessor2_0(is_training=True)
 
     t0 = None
@@ -1911,12 +1914,15 @@ def main(args):
             text_encoder_2_lora_layers = None
             text_encoder_3_lora_layers = None
         # save lora weights
+        # Current diffusers do not support saving lora layers for 3rd text encoder:
+        # https://github.com/huggingface/diffusers/blob/38ced7ee594089ef0a19e3b4b1bffb3b3c6b1bbc/src/diffusers/loaders/lora_pipeline.py#L1045
+        # TODO: We can add this easily to diffusers in the future, but for now we save what we can
         GaudiStableDiffusion3Pipeline.save_lora_weights(
             save_directory=args.output_dir,
             transformer_lora_layers=transformer_lora_layers,
             text_encoder_lora_layers=text_encoder_lora_layers,
             text_encoder_2_lora_layers=text_encoder_2_lora_layers,
-            text_encoder_3_lora_layers=text_encoder_3_lora_layers,
+            #text_encoder_3_lora_layers=text_encoder_3_lora_layers,
         )
 
         # Final inference:
