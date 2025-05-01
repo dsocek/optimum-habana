@@ -2943,11 +2943,16 @@ class DreamBoothLoRASD3(TestCase):
         instance_prompt = "a photo of sks dog"
         validation_prompt = "a photo of sks dog in a bucket"
         with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_download(
+                "diffusers/dog-example", local_dir=tmpdir, repo_type="dataset", ignore_patterns=".gitattributes"
+            )
+            cache_dir = Path(tmpdir, ".cache")
+            
             test_args = f"""
                 python3
                 {path_to_script}
                 --pretrained_model_name_or_path stabilityai/stable-diffusion-3-medium-diffusers
-                --dataset_name {Path(os.path.dirname(__file__)) / "resource/img/dog"}
+                --dataset_name {tmpdir}
                 --resolution 256
                 --train_batch_size 1
                 --gradient_accumulation_steps 1
@@ -2962,6 +2967,7 @@ class DreamBoothLoRASD3(TestCase):
                 --use_hpu_graphs_for_inference
                 --mixed_precision bf16
                 --bf16
+                --sdp_on_bf16
                 --num_validation_images 1
                 --output_dir {tmpdir}
                 """.split()
@@ -2985,7 +2991,7 @@ class DreamBoothLoRASD3(TestCase):
             self.assertTrue(is_lora)
 
             # when not training the text encoder, all the parameters in the state dict should start
-            # with `"unet"` in their names.
+            # with `"transformer"` in their names.
             if train_text_encoder:
                 starts_with_transformer = all(
                     k.startswith("transformer") or k.startswith("text_encoder") or k.startswith("text_encoder_2")
@@ -2995,10 +3001,21 @@ class DreamBoothLoRASD3(TestCase):
                 starts_with_transformer = all(key.startswith("transformer") for key in lora_state_dict.keys())
             self.assertTrue(starts_with_transformer)
 
+            if cache_dir.is_dir():
+                shutil.rmtree(cache_dir)
+
+    @check_gated_model_access("stabilityai/stable-diffusion-3-medium-diffusers")
+    @pytest.mark.skipif(IS_GAUDI1, reason="does not fit into Gaudi1 memory")
     def test_dreambooth_lora_sd3(self):
+        orig_value = os.environ.get("PT_HPU_MAX_COMPOUND_OP_SIZE")
         os.environ["PT_HPU_MAX_COMPOUND_OP_SIZE"] = '1'
-        self._test_dreambooth_lora_sd3(train_text_encoder=False)
-        os.environ.pop("PT_HPU_MAX_COMPOUND_OP_SIZE", None)
+        try:
+            self._test_dreambooth_lora_sd3(train_text_encoder=False)
+        finally:
+            if orig_value is not None:
+                os.environ["PT_HPU_MAX_COMPOUND_OP_SIZE"] = orig_value
+            else:
+                del os.environ["PT_HPU_MAX_COMPOUND_OP_SIZE"]
 
         
 class GaudiStableVideoDiffusionPipelineTester(TestCase):
