@@ -67,9 +67,8 @@ from transformers import CLIPTextModelWithProjection, CLIPTokenizer, PretrainedC
 from optimum.habana import GaudiConfig
 from optimum.habana.accelerate import GaudiAccelerator
 from optimum.habana.diffusers import GaudiStableDiffusion3Pipeline
-from optimum.habana.diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import (
-    GaudiJointAttnProcessor2_0,
-)
+from optimum.habana.diffusers.models.attention_processor import GaudiJointAttnProcessor2_0
+
 from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
 from optimum.habana.transformers.trainer import _is_peft_model
 from optimum.habana.utils import HabanaProfile, set_seed, to_gb_rounded
